@@ -1,0 +1,47 @@
+diff --git a/cmake/rexglue_install.cmake b/cmake/rexglue_install.cmake
+index d9a64eb..2127ef5 100644
+--- a/cmake/rexglue_install.cmake
++++ b/cmake/rexglue_install.cmake
+@@ -191,6 +191,7 @@ install(EXPORT rexglueTargets
+ #
+ # Windows: HKCU\Software\Kitware\CMake\Packages\rexglue  (REG_SZ, value name = MD5 hash)
+ # Unix:    ~/.cmake/packages/rexglue/<hash>               (file containing prefix path)
++if(NOT CMAKE_EXPORT_NO_PACKAGE_REGISTRY)
+ install(CODE [[
+     # Normalize path casing on Windows before hashing to avoid duplicate entries
+     if(CMAKE_HOST_WIN32)
+@@ -215,3 +216,4 @@ install(CODE [[
+     message(STATUS "Registered rexglue in CMake user package registry")
+     message(STATUS "  -> ${CMAKE_INSTALL_PREFIX}")
+ ]])
++endif()
+diff --git a/src/core/dynlib_posix.cpp b/src/core/dynlib_posix.cpp
+index 5008222..42881fa 100644
+--- a/src/core/dynlib_posix.cpp
++++ b/src/core/dynlib_posix.cpp
+@@ -1,5 +1,8 @@
+ #include <rex/platform.h>
+ #include <rex/platform/dynlib.h>
++#if REX_PLATFORM_MAC
++#include <rex/filesystem.h>
++#endif
+ 
+ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC || REX_PLATFORM_PS5,
+               "This file is POSIX-only");
+@@ -28,6 +31,16 @@ DynamicLibrary& DynamicLibrary::operator=(DynamicLibrary&& other) noexcept {
+ bool DynamicLibrary::Load(const std::filesystem::path& path, SymbolResolution mode) {
+   Close();
+   int flags = (mode == SymbolResolution::kImmediate) ? RTLD_NOW : RTLD_LAZY;
++#if REX_PLATFORM_MAC
++  // Generated guest module registries contain a platform-neutral basename.
++  // Resolve that name beside the host instead of relying on dyld's cwd search.
++  if (!path.has_parent_path() && path.extension().empty()) {
++    auto module_path = rex::filesystem::GetExecutableFolder() /
++                       ("lib" + path.string() + ".dylib");
++    handle_ = dlopen(module_path.c_str(), flags);
++    if (handle_) return true;
++  }
++#endif
+   handle_ = dlopen(path.c_str(), flags);
+   return handle_ != nullptr;
+ }

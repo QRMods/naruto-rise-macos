@@ -1,0 +1,13 @@
+--- a/src/ui/window_sdl.cpp
++++ b/src/ui/window_sdl.cpp
+@@ -239,6 +239,10 @@
+   }
+   return SDL_GetPointerProperty(SDL_GetWindowProperties(sdl_window_),
+                                 SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
++#elif REX_PLATFORM_MAC
++  // The SDL window itself: a renderer that draws on its own (the native
++  // renderer's Vulkan backend) creates a Metal view and surface from it.
++  return sdl_window_;
+ #else
+   return nullptr;
+ #endif

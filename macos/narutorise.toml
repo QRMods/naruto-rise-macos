@@ -1,0 +1,68 @@
+# Native CPU execution on Apple Silicon. Renderer: "native" (the PC port's
+# D3D interception renderer on Vulkan/MoltenVK, the default) or "xenos" (the
+# emulated Xbox 360 GPU, the alternative when something does not look right).
+renderer = "native"
+native_backend = "vulkan"
+gpu_plugin = "xenos"
+skip_intro_videos = true
+user_language = 5
+execute_unclipped_draw_vs_on_cpu = true
+protect_zero = false
+input_backend = "sdl"
+mnk_mode = true
+mnk_mouse = true
+mnk_sensitivity = 1.0
+keybind_a = "Space"
+keybind_b = "E,Backspace"
+keybind_x = "LMB,J"
+keybind_y = "RMB,K"
+keybind_left_shoulder = "Q"
+keybind_right_shoulder = "R"
+keybind_left_trigger = "Control"
+keybind_right_trigger = "Shift"
+keybind_lstick_press = "C"
+keybind_rstick_press = "MMB,V"
+keybind_start = "Return,Escape"
+keybind_back = "Tab"
+keybind_lstick_up = "W"
+keybind_lstick_down = "S"
+keybind_lstick_left = "A"
+keybind_lstick_right = "D"
+keybind_rstick_up = "Numpad8"
+keybind_rstick_down = "Numpad2"
+keybind_rstick_left = "Numpad4"
+keybind_rstick_right = "Numpad6"
+keybind_dpad_up = "Up,1"
+keybind_dpad_down = "Down,2"
+keybind_dpad_left = "Left,3"
+keybind_dpad_right = "Right,4"
+fullscreen = false
+vsync = true
+resolution_scale = 1
+draw_resolution_scale_x = 1
+draw_resolution_scale_y = 1
+anisotropic_override = 0
+# PS5 port settings: one submission per guest frame where possible, keep
+# CPU-uploaded pages valid across frames (16 KB host pages are write-watched),
+# and present each frame for whole display refreshes.
+vulkan_submit_on_primary_buffer_end = false
+clear_memory_page_state = false
+present_frame_pacing = true
+present_effect = "bilinear"
+# Xenos renderer only (F1 toggles it).
+show_fps_overlay = false
+# Native renderer only. frame_rate: 30 keeps the game's rate in the open world
+# (fights always show at their 60); 60 to 240 interpolate frames in between,
+# which an M4's GPU does not sustain in the village (about 40).
+frame_rate = 30
+# msaa_samples: 0 = the game's 4x, or 2, 4, 8.
+msaa_samples = 0
+transparency_antialiasing = false
+# 0.5 = the game's brightness.
+brightness = 0.5
+# Fractional internal scale (1.5 = 1920x1080); 0 = resolution_scale.
+internal_resolution_scale = 0.0
+max_frame_latency = 1
+triple_buffering = false
+log_level = "info"
+log_verbose = false
