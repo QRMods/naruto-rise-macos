@@ -84,9 +84,17 @@ Lo propio de macOS está en `macos/`:
 - `naruto-native-macos.patch`: superficie Metal, lectura segura de memoria y FPS en el log.
 - `rexglue-*.patch`: cambios del SDK (ventana SDL, presentador Vulkan, carga de módulos).
 
+## Shaders nuevos sin tirones
+
+Cada combinación de shaders nueva se traduce a Metal y se compila al aparecer, lo que
+en un Mac cuesta de decenas a cientos de milisegundos. En macOS:
+
+- El objeto cuyo pipeline aún no está listo se omite durante ese instante, en vez de
+  congelar el fotograma; aparece en cuanto termina de compilarse.
+  `REX_NATIVE_PSO_ASYNC=prefetch` recupera la espera del port de PC.
+- Los pipelines ya compilados se guardan en `user/cache/native-vulkan-pipelines.bin`
+  y se reutilizan en las siguientes sesiones.
+
 ## Pendiente
 
-- El guardado y la carga no se han verificado de principio a fin: al empezar la historia
-  el juego no permite guardar todavía. El juego sí crea correctamente sus ranuras de
-  guardado en `user/`.
-- La primera vez que aparece una combinación de shaders nueva puede haber un tirón breve.
+- El modo de 60 FPS interpolado no se sostiene en el pueblo en un M4 (unos 40).

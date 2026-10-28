@@ -1,3 +1,22 @@
+diff --git a/app/src/gpu/backend/pipeline_set.cpp b/app/src/gpu/backend/pipeline_set.cpp
+index 2026ae3..7a9abd0 100644
+--- a/app/src/gpu/backend/pipeline_set.cpp
++++ b/app/src/gpu/backend/pipeline_set.cpp
+@@ -87,7 +87,14 @@ bool PipelineSet::Post(uint64_t key, PipelineDesc desc, bool only_if_absent, boo
+ // Two thirds of the hardware threads, at least two, as the recomps.
+ void PipelineSet::StartThreads(bool lowest) {
+   const unsigned threads = std::max(2u, std::thread::hardware_concurrency() * 2 / 3);
++#if defined(__APPLE__)
++  // The skip take is the macOS default: the skipped draws come back as soon
++  // as their pipelines are created, so the threads keep the normal priority.
++  (void)lowest;
++  const int base = THREAD_PRIORITY_NORMAL;
++#else
+   const int base = lowest ? THREAD_PRIORITY_LOWEST : THREAD_PRIORITY_NORMAL;
++#endif
+   for (unsigned i = 0; i < threads; ++i) threads_.emplace_back([this, base] { Work(base); });
+ }
+ 
 diff --git a/app/src/gpu/backend/vulkan/backend.cpp b/app/src/gpu/backend/vulkan/backend.cpp
 index d94579c..b73bd97 100644
 --- a/app/src/gpu/backend/vulkan/backend.cpp
@@ -14,6 +33,37 @@ index d94579c..b73bd97 100644
  
  namespace plume { std::unique_ptr<RenderInterface> CreateVulkanInterface(); }
  
+diff --git a/app/src/gpu/backend/vulkan/graphics.h b/app/src/gpu/backend/vulkan/graphics.h
+index 2eb2a82..ceee425 100644
+--- a/app/src/gpu/backend/vulkan/graphics.h
++++ b/app/src/gpu/backend/vulkan/graphics.h
+@@ -10,6 +10,12 @@
+ #include <set>
+ #include <regex>
+ 
++#if defined(__APPLE__)
++// The pipeline cache kept across sessions (macos/native/pipeline_disk_cache.cpp).
++VkPipelineCache NarutoriseVulkanPipelineCache(VkDevice device);
++void NarutoriseVulkanPipelineCreated();
++#endif
++
+ namespace gpu::vulkan {
+ struct GraphicsPipeline {
+   VkDevice device{};
+@@ -260,7 +266,13 @@ inline NativeResult MakeGraphicsPipeline(VkDevice device, VkPipelineLayout layou
+     info.pInputAssemblyState = &assembly; info.pViewportState = &viewport; info.pRasterizationState = &raster;
+     info.pMultisampleState = &ms; info.pDepthStencilState = &ds; info.pColorBlendState = &blend;
+     info.pDynamicState = &dynamic; info.layout = layout; info.renderPass = pipeline->pass;
++#if defined(__APPLE__)
++    result = vkCreateGraphicsPipelines(device, NarutoriseVulkanPipelineCache(device), 1, &info, nullptr,
++                                       &pipeline->pipeline);
++    if (result == VK_SUCCESS) NarutoriseVulkanPipelineCreated();
++#else
+     result = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline->pipeline);
++#endif
+   }
+   for (auto module : modules) if (module) vkDestroyShaderModule(device, module, nullptr);
+   if (result != VK_SUCCESS) return NativeResult::Failed("native-vulkan-graphics-pipeline", result);
 diff --git a/app/src/gpu/backend/vulkan/present.inc b/app/src/gpu/backend/vulkan/present.inc
 index ffe788f..fb0c13f 100644
 --- a/app/src/gpu/backend/vulkan/present.inc
@@ -86,6 +136,28 @@ index 38fe2a7..95c708a 100644
  inline bool ReadPhysical(uint8_t* base, uint32_t physical, uint32_t size, void* out) {
    if (physical >= 0x20000000u || size > 0x20000000u - physical) return false;
    return CopyFromGuest(out, base + 0x100000000ull + physical, size);
+diff --git a/app/src/gpu/d3d/draw.cpp b/app/src/gpu/d3d/draw.cpp
+index cef1e0a..908b5d6 100644
+--- a/app/src/gpu/d3d/draw.cpp
++++ b/app/src/gpu/d3d/draw.cpp
+@@ -369,8 +369,17 @@ DrawRequest::PipelineTake BatchedPipelineTake() {
+     const char* text = std::getenv("REX_NATIVE_PSO_ASYNC");
+     const std::string_view option = text ? text : "";
+     if (option == "0") return DrawRequest::PipelineTake::kSync;
++#if defined(__APPLE__)
++    // On MoltenVK a new pipeline translates its shaders to Metal and compiles
++    // them, up to hundreds of milliseconds: waiting for it froze the frame each
++    // time the game showed something new. The draw of a pipeline not ready
++    // skips until its creation ends (REX_NATIVE_PSO_ASYNC=prefetch waits).
++    if (option == "prefetch") return DrawRequest::PipelineTake::kPrefetch;
++    return DrawRequest::PipelineTake::kSkip;
++#else
+     if (option == "1" && Diagnostics()) return DrawRequest::PipelineTake::kSkip;
+     return DrawRequest::PipelineTake::kPrefetch;
++#endif
+   }();
+   return value;
+ }
 diff --git a/app/src/gpu/d3d/frame.cpp b/app/src/gpu/d3d/frame.cpp
 index cc55a42..fa3d3ab 100644
 --- a/app/src/gpu/d3d/frame.cpp

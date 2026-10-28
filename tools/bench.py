@@ -49,8 +49,11 @@ def main():
             return
         fps = statistics.mean(float(s[0]) for s in tail)
         worst = max(float(s[5]) for s in tail)
+        peaks = [float(s[5]) for s in samples]
         print(f'{args.name}: {fps:.1f} fps over the last {len(tail) / 2:.1f} s (native; worst frame {worst:.1f} ms, '
-              f'{len(samples)} samples)')
+              f'{len(samples)} samples); whole run: {statistics.mean(float(s[0]) for s in samples):.1f} fps, '
+              f'{sum(p > 60 for p in peaks)} half-seconds with a frame over 60 ms, {sum(p > 200 for p in peaks)} '
+              f'over 200 ms, worst {max(peaks):.0f} ms')
         return
     rows = list(csv.DictReader(out.open())) if out.exists() else []
     frames, elapsed = [], 0.0

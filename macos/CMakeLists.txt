@@ -58,7 +58,7 @@ if(NARUTORISE_NATIVE)
         "${GPU}/diagnostics/frame_state.cpp" "${GPU}/diagnostics/census.cpp" "${GPU}/diagnostics/frame_trace.cpp"
         "${GPU}/diagnostics/start_evidence.cpp" "${GPU}/diagnostics/frame_capture.cpp"
         "${GPU}/diagnostics/measure.cpp" "${GPU}/diagnostics/present_proof.cpp"
-        native/diagnostics_macos.cpp "${GPU}/diagnostics/motion.cpp" "${GPU}/diagnostics/shader_keys.cpp"
+        native/diagnostics_macos.cpp native/pipeline_disk_cache.cpp "${GPU}/diagnostics/motion.cpp" "${GPU}/diagnostics/shader_keys.cpp"
         "${GPU}/interpolation/tick.cpp" "${GPU}/interpolation/transforms.cpp" "${GPU}/settings.cpp"
         "${GPU}/shaders/shader_cache_data.cpp"
         "${GPU}/backend/vulkan/backend.cpp" "${GPU}/backend/vulkan/completion.cpp"

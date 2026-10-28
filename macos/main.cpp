@@ -5,6 +5,10 @@
 
 REXCVAR_DECLARE(std::string, perf_log_csv);
 
+// The native renderer's pipeline cache kept across sessions (native/pipeline_disk_cache.cpp).
+void NarutoriseSetPipelineCachePath(const std::filesystem::path& path);
+void NarutoriseVulkanPipelineCacheSave();
+
 // The SDK's search for the Vulkan loader and MoltenVK bundled with the app
 // (src/ui/vulkan/vulkan_moltenvk.h, exported by librexruntime).
 namespace rex::ui::vulkan {
@@ -24,6 +28,8 @@ extern "C" void* NarutoriseVulkanGetInstanceProcAddr() {
   static void* const get_instance_proc_addr = []() -> void* {
     const auto paths = rex::ui::vulkan::DetectMacOSVulkanRuntimePaths();
     rex::ui::vulkan::ConfigureMacOSVulkanEnvironment(paths);
+    // Metal compiles a new pipeline's shaders on several threads.
+    setenv("MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION", "1", 0);
     for (const auto& candidate : paths.loader_candidates) {
       if (void* library = dlopen(candidate.c_str(), RTLD_NOW | RTLD_LOCAL)) {
         if (void* function = dlsym(library, "vkGetInstanceProcAddr")) {
@@ -79,6 +85,13 @@ class MacApp final : public NarutoriseApp {
     } catch (const toml::parse_error& error) {
       REXLOG_ERROR("[macOS] Invalid path configuration: {}", error.description());
     }
+    if (!paths.cache_root.empty()) NarutoriseSetPipelineCachePath(paths.cache_root / "native-vulkan-pipelines.bin");
+  }
+
+  bool OnWindowCloseRequested() override {
+    // The process exits hard once the game closes: write the pipelines first.
+    NarutoriseVulkanPipelineCacheSave();
+    return NarutoriseApp::OnWindowCloseRequested();
   }
 };
 

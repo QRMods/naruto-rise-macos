@@ -206,7 +206,7 @@ def main():
     # pacing, save pictures), then the macOS-specific ones.
     apply_patches(SDK, [*sorted((PC / 'patches/sdk').glob('*.patch')), PS5 / 'ps5/patches/rexglue-ps5.patch',
                         ROOT / 'macos/rexglue-macos.patch', ROOT / 'macos/rexglue-vulkan-presenter.patch',
-                        ROOT / 'macos/rexglue-macos-window.patch'])
+                        ROOT / 'macos/rexglue-macos-window.patch', ROOT / 'macos/rexglue-posix-wait.patch'])
     if not (ROOT / 'game/default.xex').is_file():
         iso = args.iso
         if iso is None:
