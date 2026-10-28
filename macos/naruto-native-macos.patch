@@ -196,6 +196,45 @@ index 38fe2a7..d4e8d04 100644
  inline bool ReadPhysical(uint8_t* base, uint32_t physical, uint32_t size, void* out) {
    if (physical >= 0x20000000u || size > 0x20000000u - physical) return false;
    return CopyFromGuest(out, base + 0x100000000ull + physical, size);
+diff --git a/app/src/gpu/d3d/close.cpp b/app/src/gpu/d3d/close.cpp
+index 5351646..9e02dee 100644
+--- a/app/src/gpu/d3d/close.cpp
++++ b/app/src/gpu/d3d/close.cpp
+@@ -167,10 +167,24 @@ bool CloseInOrder() {
+   if (kernel) kernel->TerminateTitle();
+   std::string joined_threads, straggler_threads;
+   uint32_t joined = 0, stragglers = 0;
++#if defined(__APPLE__)
++  // The UI thread waits here with the window frozen, and a thread that does
++  // not leave within a few frames of the termination is blocked in a wait that
++  // ignores it: OnClosing hard-exits the process right after either way.
++  const auto deadline = Clock::now() + std::chrono::seconds(1);
++#else
+   const auto deadline = Clock::now() + std::chrono::seconds(3);
++#endif
+   for (const auto& guest : guests) {
+     const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
++#if defined(__APPLE__)
++    // On POSIX the native handle of an SDK thread is its condition variable,
++    // no handle of the Win32 layer: the SDK's own wait joins it.
++    const bool done = rex::thread::Wait(guest.thread->thread(), false,
++        std::chrono::milliseconds(std::max<int64_t>(left, 0))) == rex::thread::WaitResult::kSuccess;
++#else
+     const bool done = WaitForSingleObject(guest.handle, DWORD(std::max<int64_t>(left, 0))) == WAIT_OBJECT_0;
++#endif
+     std::string& list = done ? joined_threads : straggler_threads;
+     list += fmt::format("{}{{\"id\":{},\"name\":\"{}\"}}", list.empty() ? "" : ",", guest.id, guest.name);
+     ++(done ? joined : stragglers);
+@@ -179,6 +193,9 @@ bool CloseInOrder() {
+       "\"terminated\":{},\"guest_threads\":{},\"joined\":{},\"stragglers\":{},\"joined_threads\":[{}],"
+       "\"straggler_threads\":[{}],\"after_ms\":{}", kernel != nullptr, guests.size(), joined, stragglers, joined_threads,
+       straggler_threads, ms()));
++  if (!host::Journaled())
++    REXLOG_INFO("[narutorise] Close: {} of {} guest threads joined after {} ms; left: [{}]", joined, guests.size(),
++                ms(), straggler_threads);
+   // 4. The registry resources, the device services and the device owner, only
+   // with every guest thread joined (a straggler could still reach them).
+   const std::string counts_before = EngineCounts(), registry_before = "{" + ResourceSummary() + "}";
 diff --git a/app/src/gpu/d3d/draw.cpp b/app/src/gpu/d3d/draw.cpp
 index cef1e0a..908b5d6 100644
 --- a/app/src/gpu/d3d/draw.cpp
@@ -358,6 +397,26 @@ index 7ff809a..eb7578e 100644
    ~Timer() { Stop(); }
    void Stop() {
      if (slot_ == kCount) return;
+diff --git a/app/src/gpu/host/frame_completion.cpp b/app/src/gpu/host/frame_completion.cpp
+index ffb9970..07ec4ea 100644
+--- a/app/src/gpu/host/frame_completion.cpp
++++ b/app/src/gpu/host/frame_completion.cpp
+@@ -152,7 +152,15 @@ int Run() {
+ // (Run returns, XHostThread::Execute calls Exit).
+ bool Join(uint32_t ms, std::string& fields) {
+   auto* host = owner ? owner->thread() : nullptr;
++#if defined(__APPLE__)
++  // On POSIX the native handle is the thread's condition variable: the SDK's
++  // own wait joins it (close.cpp joins the guest threads the same way).
++  const DWORD wait = !host ? WAIT_FAILED
++      : rex::thread::Wait(host, false, std::chrono::milliseconds(ms)) == rex::thread::WaitResult::kSuccess
++          ? WAIT_OBJECT_0 : WAIT_TIMEOUT;
++#else
+   const DWORD wait = host ? WaitForSingleObject(static_cast<HANDLE>(host->native_handle()), ms) : WAIT_FAILED;
++#endif
+   fields = fmt::format("\"started\":{},\"closing\":{},\"thread\":{},\"wait\":{},\"joined\":{}", started.load(),
+                        closing.load(), owner ? owner->thread_id() : 0, wait, wait == WAIT_OBJECT_0);
+   return wait == WAIT_OBJECT_0;
 diff --git a/app/src/gpu/host/stop.cpp b/app/src/gpu/host/stop.cpp
 index 116a602..27ea956 100644
 --- a/app/src/gpu/host/stop.cpp

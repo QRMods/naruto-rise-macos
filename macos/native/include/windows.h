@@ -205,6 +205,11 @@ inline void GetSystemTimeAsFileTime(FILETIME* time) {
 // Kernel objects: events and waitable timers. A handle is a Win32Object.
 namespace win32_compat {
 struct Object {
+  // A handle this layer made: the SDK's threads hand out other pointers as
+  // native handles (on POSIX a thread's is its condition variable), which a
+  // wait or a close must refuse instead of reading and writing.
+  static constexpr uint32_t kMagic = 0x57334F42;
+  uint32_t magic = kMagic;
   enum class Kind { kEvent, kTimer, kFile } kind;
   std::mutex mutex;
   std::condition_variable condition;
@@ -226,7 +231,8 @@ inline std::condition_variable& WaitCondition() {
 }
 inline Object* AsObject(HANDLE handle) {
   if (!handle || handle == INVALID_HANDLE_VALUE || handle == GetCurrentThread()) return nullptr;
-  return static_cast<Object*>(handle);
+  auto* object = static_cast<Object*>(handle);
+  return object->magic == Object::kMagic ? object : nullptr;
 }
 // Checks and consumes the signal of an object; WaitMutex is held.
 inline bool TryAcquire(Object* object) {
@@ -394,6 +400,7 @@ inline BOOL CloseHandle(HANDLE handle) {
   auto* object = win32_compat::AsObject(handle);
   if (!object) return FALSE;
   if (object->fd >= 0) close(object->fd);
+  object->magic = 0;
   delete object;
   return TRUE;
 }
