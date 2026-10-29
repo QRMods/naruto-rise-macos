@@ -1,127 +1,294 @@
-# Naruto: Rise of a Ninja para macOS (Apple Silicon)
+# Naruto: Rise of a Ninja for macOS (Apple Silicon)
 
-Port nativo del juego de Xbox 360 a Macs con chip Apple. El código PowerPC del juego
-se recompila estáticamente a ARM64 y los gráficos se dibujan con el renderizador
-nativo del port de PC: intercepta las llamadas Direct3D del juego y las ejecuta en
-Vulkan sobre Metal (MoltenVK). La emulación de la GPU Xenos queda como alternativa.
+A native port of the Xbox 360 game to Macs with Apple chips. There is no emulator:
+the game's PowerPC code is recompiled to ARM64 ahead of time, and the graphics run
+through the PC port's native renderer, which takes the game's Direct3D calls and
+draws them with Vulkan on top of Metal (MoltenVK).
 
-Necesitas tu propia copia del juego (imagen ISO de Xbox 360). Ni el juego ni el
-código generado a partir de él se distribuyen con este proyecto.
+> [!IMPORTANT]
+> **You need your own copy of the game.** This project contains no game files.
+> It builds the game on your Mac from a disc image (`.iso`) of your Xbox 360 disc.
+> Neither the game nor anything generated from it is distributed here.
 
-## Requisitos
+**Using an AI assistant (ChatGPT, Claude, Gemini…)?** Give it
+[INSTALL.md](INSTALL.md). That guide is written for AI assistants: it has every
+command, how to check that each step worked, and the fix for each known error.
 
-- Mac con Apple Silicon y macOS 26 o posterior.
-- Xcode, CMake, Git y Python 3.
-- La ISO del juego en la carpeta `Naruto - Rise of a Ninja/`, o indicada con `--iso`.
+## What you need
 
-## Compilar y jugar
+- A Mac with Apple Silicon (M1, M2, M3, M4 or newer). Intel Macs are not supported.
+- macOS 26 (Tahoe) or newer.
+- About 8 GB of free disk space, plus the space your `.iso` takes up (about 7.3 GB).
+- An internet connection for the first build, which downloads the source code it needs.
+- A disc image (`.iso`) of your own **Naruto: Rise of a Ninja** Xbox 360 disc, USA or
+  European release (Title ID `555307E5`).
+
+## Installation, step by step
+
+Most steps use **Terminal**. To open it, press `Cmd + Space`, type `Terminal` and
+press Enter. To run a command, paste it into the Terminal window and press Enter.
+
+### 1. Install Xcode
+
+1. Install **Xcode** from the [Mac App Store](https://apps.apple.com/app/xcode/id497799835).
+   It is free, but large, so the download takes a while.
+2. Open Xcode once. Accept the license and let it install its extra components.
+   Then you can close it. You never need to use Xcode itself.
+
+### 2. Install Homebrew and CMake
+
+[Homebrew](https://brew.sh) installs developer tools. Paste this into Terminal (it asks
+for your Mac password; typing it shows nothing on screen, which is normal):
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+When it finishes, it prints **Next steps** with two or three commands. Run them. They
+make the `brew` command work. Then install CMake:
+
+```bash
+brew install cmake
+```
+
+### 3. Download this project
+
+This creates a `naruto-rise-macos` folder in your home folder:
+
+```bash
+cd ~
+```
+
+```bash
+git clone https://github.com/QRMods/naruto-rise-macos.git
+```
+
+If macOS asks you to install the "command line developer tools", accept and run the
+command again. Don't put the project in iCloud Drive, or in a Desktop or Documents
+folder that syncs with iCloud: the build creates thousands of files.
+
+### 4. Add your game
+
+Create the folder where the build looks for the disc image:
+
+```bash
+mkdir -p ~/naruto-rise-macos/"Naruto - Rise of a Ninja"
+```
+
+```bash
+open ~/naruto-rise-macos
+```
+
+A Finder window opens. Copy your `.iso` into the `Naruto - Rise of a Ninja` folder.
+It must be the only `.iso` in there.
+
+### 5. Build the game
+
+In that Finder window, double-click **Build.command**. A Terminal window opens and the
+build starts. Or run it from Terminal:
+
+```bash
+cd ~/naruto-rise-macos
+```
 
 ```bash
 ./Build.command
 ```
 
-Equivale a `python3 tools/build.py`; acepta `--iso /ruta/al/juego.iso` y `--jobs N`.
-Descarga las fuentes en las revisiones fijadas en `sources.json`, aplica los parches,
-extrae el juego en `game/`, genera el código recompilado, traduce los shaders del
-juego (XenosRecomp, DXC, SPIR-V) y crea `dist/Naruto Rise of a Ninja.app`.
+The first build takes a long time: it downloads the source code, extracts your disc,
+recompiles the whole game and translates its shaders. Leave the window open until it
+ends with a line like this:
 
-```bash
-./Play.command
+```
+Application: /Users/you/naruto-rise-macos/dist/Naruto Rise of a Ninja.app
 ```
 
-Las partidas guardadas, la caché y los logs se quedan en `user/`.
+If your `.iso` is somewhere else, give its location: type `./Build.command --iso `
+(with a space at the end), drag the `.iso` file onto the Terminal window and press Enter.
 
-## Controles (teclado y ratón)
+After the first build, the game is extracted in `game/`. You can move the `.iso`
+somewhere else if you need the space.
 
-| Mando | Teclas |
+### 6. Play
+
+Double-click **Play.command**, or open `dist/Naruto Rise of a Ninja.app`. To keep it
+handy, drag the app from `dist/` to the Dock.
+
+Keep the `naruto-rise-macos` folder where it is: the app finds the game and your saves
+through it (if you already moved it, see [step 9 of INSTALL.md](INSTALL.md#step-9-play)).
+Saves, settings, the cache and the logs are in its `user/` folder.
+
+## Controls (keyboard and mouse)
+
+| Controller | Keys |
 | --- | --- |
-| Stick izquierdo | W A S D |
-| Cámara | Ratón o teclado numérico 8 4 2 6 |
-| A / B / X / Y | Espacio / E / J o clic izquierdo / K o clic derecho |
+| Left stick | W A S D |
+| Camera (right stick) | Mouse, or numeric keypad 8 4 2 6 |
+| A | Space |
+| B | E or Backspace |
+| X | J or left click |
+| Y | K or right click |
 | LB / RB | Q / R |
-| LT / RT | Control / Mayúsculas |
-| Start / Back | Intro o Esc / Tab |
-| Cruceta | Flechas o 1 2 3 4 |
+| LT / RT | Control / Shift |
+| Left / right stick press | C / V or middle click |
+| Start | Return or Esc |
+| Back | Tab |
+| D-pad | Arrow keys, or 1 2 3 4 |
 
-Un mando compatible con SDL también funciona. Las teclas se cambian en
-`user/narutorise.toml` (`keybind_*`).
+A controller that works with SDL (Xbox, PlayStation and most others) works too. You can
+change the keys in `user/narutorise.toml` (the `keybind_*` lines).
 
-## Configuración
+## Settings
 
-`user/narutorise.toml` (se crea en la primera compilación a partir de `macos/narutorise.toml`):
+Settings are in `user/narutorise.toml`, created by the first build. Edit it with any text
+editor, such as TextEdit. Type straight quotes (`"`), not curly ones: in TextEdit, turn off
+**Edit ▸ Substitutions ▸ Smart Quotes**. Changes apply the next time you start the game.
 
-- `renderer = "native"` (por defecto) o `"xenos"` (la GPU emulada, si algo se ve mal).
-- `frame_rate = 30`: el mundo abierto a 30 como en consola; los combates van siempre a 60.
-  De 60 a 240 se interpolan fotogramas, pero en un M4 el pueblo se queda en unos 40.
-- `msaa_samples`: 0 es el 4× del juego; 2, 4 u 8.
-- `fullscreen`, `vsync`, `brightness`, `internal_resolution_scale` (1.5 = 1080p).
+| Setting | What it does |
+| --- | --- |
+| `user_language` | Game language: `1` English (default), `3` German, `4` French, `5` Spanish, `6` Italian. The languages available depend on your disc. |
+| `renderer` | `"native"` (default) or `"xenos"`, the emulated Xbox 360 GPU, which is slower. Try it if something looks wrong. |
+| `frame_rate` | `30` (default) keeps the open world at 30 FPS like the console. Fights always run at 60. From `60` to `240`, extra frames are interpolated, but on an M4 the village only reaches about 40. |
+| `msaa_samples` | Anti-aliasing: `0` is the game's own 4×; also `2`, `4` or `8`. |
+| `internal_resolution_scale` | `1.5` renders at 1920×1080; `0` uses `resolution_scale`. |
+| `fullscreen`, `vsync` | `true` or `false`. |
+| `brightness` | `0.5` is the game's brightness. |
 
-Con `REX_NATIVE_FPS_TITLE=1` en el entorno, el título de la ventana muestra los FPS.
+To see the FPS in the window title, start the game from Terminal, inside the project
+folder, with
+`REX_NATIVE_FPS_TITLE=1 "dist/Naruto Rise of a Ninja.app/Contents/MacOS/narutorise"`.
 
-## Rendimiento (MacBook con M4)
+## Updating
 
-| Escena | Renderizador nativo | Xenos (emulación) |
+```bash
+cd ~/naruto-rise-macos
+```
+
+```bash
+git pull
+```
+
+Then run `./Build.command` again. Your saves and settings in `user/` are kept.
+
+If the build then stops with `Preserving edits in ...`, the update moved one of the
+source projects to a new version. Delete the old copy and build again:
+
+```bash
+rm -rf upstream/naruto-rise-recomp build/applied-patches
+```
+
+## Troubleshooting
+
+| Message | What to do |
+| --- | --- |
+| `This build targets an Apple Silicon Mac.` | Only Macs with Apple chips are supported. |
+| `Missing tool: cmake` (or `git`) | Repeat step 2 (or install Xcode, step 1). |
+| `Select your disc image with --iso /path/to/game.iso` | There is no `.iso`, or more than one, in `Naruto - Rise of a Ninja/`. Fix that, or use `--iso`. |
+| `You have not agreed to the Xcode license agreements` | Open Xcode once and accept the license. |
+| `CMake 3.25 or higher is required` | Run `brew upgrade cmake`. |
+| `Preserving edits in ...` | See [Updating](#updating). |
+| `permission denied: ./Build.command` | You downloaded a ZIP instead of using `git clone`. Run `chmod +x Build.command Play.command`. |
+| A download fails | Check your internet connection and run the build again. |
+| The build was interrupted while extracting the disc | Delete the `game` folder and build again. |
+| The Mac gets very slow during the build | Build with fewer parallel jobs: `./Build.command --jobs 2`. |
+
+To report a problem, open an [issue](https://github.com/QRMods/naruto-rise-macos/issues)
+and attach `user/logs/narutorise.log`.
+
+## Performance (MacBook with M4)
+
+| Scene | Native renderer | Xenos (emulation) |
 | --- | --- | --- |
-| Konoha (mundo abierto) | 30 FPS estables | 12-15 FPS |
-| Combate | 59 FPS | 16-20 FPS |
+| Konoha (open world) | Steady 30 FPS | 12-15 FPS |
+| Fight | 59 FPS | 16-20 FPS |
 
-### Comprobar caídas de FPS sin jugar
+### Checking for frame drops without playing
 
 ```bash
 python3 tools/scenarios.py --cold
 ```
 
-Recorre escenas solo, sin que nadie juegue: Konoha, la partida guardada (con la entrada
-grabada en `user/replays/user-route.nrinput`) y los escenarios del Modo Lucha uno a uno,
-con la entrada generada por el propio script. Mide cada escena y marca como fallo la que
-baje de su objetivo (30 FPS en el mundo, 60 en combate) o tenga un fotograma de más del
-doble de lo previsto. Juega sobre una copia de `user/`, así que no toca tus partidas.
-`--cold` empieza sin la caché de pipelines, como la primera vez que se juega;
-`--only konoha fight-stage-3` repite escenas concretas. Para medir otra ruta, grábala con
-`REX_NATIVE_INPUT_RECORD=archivo.nrinput` al jugar.
+This plays through scenes on its own: Konoha, your saved game (with the input recorded
+in `user/replays/user-route.nrinput`) and the Fight Mode stages one by one, with input
+generated by the script. It measures each scene and reports a failure when a scene drops
+below its target (30 FPS in the world, 60 in fights) or has a frame more than twice as
+long as expected. It plays on a copy of `user/`, so your saves are not touched. `--cold`
+starts without the pipeline cache, like the first time you play; `--only konoha
+fight-stage-3` repeats specific scenes. To measure another route, record it while playing
+with `REX_NATIVE_INPUT_RECORD=file.nrinput`.
 
-## De dónde sale cada parte
+## How it works
 
-- [naruto-rise-recomp](https://github.com/jorjbarbosa/naruto-rise-recomp) (port de PC):
-  la recompilación, la aplicación, el renderizador nativo y su cadena de shaders.
-- [naruto-ps5](https://github.com/mshivam019/naruto-ps5): su parche del SDK (vigilancia
-  de escrituras con páginas de 16 KB, envíos a Vulkan, ritmo de presentación,
-  miniaturas de las partidas), el extractor de la ISO y el hilo de carga.
-- [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) y [Plume](https://github.com/renderbag/plume).
+This repository doesn't copy the projects it builds on. `tools/build.py` clones them
+into `upstream/` at the commits pinned in `sources.json`, applies the patches, extracts
+the game into `game/`, generates the recompiled code, translates the game's shaders
+(XenosRecomp, DXC, SPIR-V) and creates `dist/Naruto Rise of a Ninja.app`.
 
-Lo propio de macOS está en `macos/`:
+The macOS-specific code is in `macos/`:
 
-- `main.cpp`, `platform.cpp`: entrada de la app y búsqueda del cargador de Vulkan del paquete.
-- `native/`: la capa Win32 del renderizador nativo sobre POSIX, Mach y SDL3, la caché de
-  pipelines en disco y la copia protegida de la memoria del juego.
-- `naruto-native-macos.patch`: superficie Metal, lectura de memoria, omisión de pipelines
-  en Vulkan, y FPS y fotogramas lentos (`[native-hitch]`) en el log.
-- `rexglue-*.patch`: cambios del SDK (ventana SDL, presentador Vulkan, carga de módulos).
+- `main.cpp`, `platform.cpp`: the app's entry point and the lookup of the bundled Vulkan loader.
+- `native/`: the native renderer's Win32 layer on POSIX, Mach and SDL3, the on-disk
+  pipeline cache, and the guarded copy of the game's memory.
+- `naruto-native-macos.patch`: the Metal surface, memory reads, pipeline skipping on
+  Vulkan, and FPS and slow-frame (`[native-hitch]`) lines in the log.
+- `rexglue-*.patch`: SDK changes (SDL window, Vulkan presenter, module loading).
 
-## Shaders nuevos sin tirones
+### New shaders without stutter
 
-Cada combinación de shaders nueva se traduce a Metal y se compila al aparecer, lo que
-en un Mac cuesta de decenas a cientos de milisegundos. En macOS:
+Each new shader combination is translated to Metal and compiled when it first appears,
+which costs tens to hundreds of milliseconds on a Mac. On macOS:
 
-- El objeto cuyo pipeline aún no está listo se omite durante ese instante, en vez de
-  congelar el fotograma; se compila en otros hilos y aparece en cuanto termina.
-  El backend Vulkan del port de PC nunca omitía: compilaba cada pipeline nuevo en el
-  hilo que graba los fotogramas, y cada espera de fence del juego se quedaba detrás
-  (tirones de 200 a 900 ms al aparecer contenido nuevo). En macOS omite como el de D3D12.
-  `REX_NATIVE_PSO_ASYNC=prefetch` recupera la espera del port de PC.
-- Los pipelines ya compilados se guardan en `user/cache/native-vulkan-pipelines.bin`
-  y se reutilizan en las siguientes sesiones.
+- An object whose pipeline isn't ready yet is skipped for that moment instead of
+  freezing the frame. The pipeline compiles on other threads and the object appears as
+  soon as it's done. The PC port's Vulkan backend never skipped: it compiled each new
+  pipeline on the thread that records frames, and every fence wait of the game queued
+  behind it (200 to 900 ms stutters when new content appeared). On macOS it skips like
+  the D3D12 backend does. `REX_NATIVE_PSO_ASYNC=prefetch` brings back the PC port's wait.
+- Compiled pipelines are saved in `user/cache/native-vulkan-pipelines.bin` and reused in
+  later sessions.
 
-## Lectura de la memoria del juego
+### Reading the game's memory
 
-El renderizador lee de la memoria del juego los vértices, índices, constantes y fences
-de cada draw, miles de veces por fotograma. En PC cada lectura es un `memcpy` bajo
-`__try`; en macOS era una llamada al kernel (`mach_vm_read_overwrite`), unas 60 veces
-más lenta, así que el coste crecía con lo que dibujaba cada escena. Ahora es un `memcpy`
-con un manejador de señales delante del del SDK (`macos/native/guest_fault_guard.cpp`):
-una dirección sin memoria hace fallar la copia, como en PC, y la vigilancia de escrituras
-del SDK sigue recibiendo sus fallos.
+For each draw, the renderer reads vertices, indices, constants and fences from the
+game's memory, thousands of times per frame. On PC each read is a `memcpy` under
+`__try`. On macOS it used to be a kernel call (`mach_vm_read_overwrite`), about 60 times
+slower, so the cost grew with how much each scene drew. Now it's a `memcpy` with a signal
+handler installed ahead of the SDK's (`macos/native/guest_fault_guard.cpp`): an address
+with no memory makes the copy fail, as on PC, and the SDK's write watching still gets
+its faults.
 
-## Pendiente
+### Updating the source projects
 
-- El modo de 60 FPS interpolado no se sostiene en el pueblo en un M4 (unos 40).
+To move a source project to a new version, change its commit in `sources.json` and build
+again. The PC port and the SDK carry the patches applied, so first delete
+`upstream/naruto-rise-recomp` and `build/applied-patches/`. If only the patches change,
+building is enough: the applied ones are reverted and the new ones applied. If a patch no
+longer applies, fix it on the code in `upstream/` and regenerate the file with `git diff`.
+
+### Known issues
+
+- The interpolated 60 FPS mode doesn't hold in the village on an M4 (about 40).
+
+## Credits
+
+- [naruto-rise-recomp](https://github.com/jorjbarbosa/naruto-rise-recomp) (PC port):
+  the recompilation, the application, the native renderer and its shader pipeline.
+- [naruto-ps5](https://github.com/mshivam019/naruto-ps5): its SDK patch (write watching
+  with 16 KB pages, Vulkan submissions, presentation pacing, save thumbnails), the ISO
+  extractor and the loading thread.
+- [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) and [Plume](https://github.com/renderbag/plume).
+
+## License
+
+macOS port by [alantero](https://github.com/alantero), published by
+[QRMods](https://github.com/QRMods). Copyright (C) 2026 alantero.
+
+The code in this repository is licensed under version 3 of the GNU General Public
+License ([LICENSE](LICENSE), GPL-3.0-only), the same license as the PC port its patches
+apply to. Each source project keeps its own license: naruto-ps5 and Plume (MIT) and the
+ReXGlue SDK (BSD-3-Clause). The built app includes their notices in
+`Contents/Resources/licenses/`.
+
+This is an unofficial fan project, not affiliated with Ubisoft, Microsoft or the owners
+of Naruto. Naruto: Rise of a Ninja, its content and its trademarks belong to their
+respective owners.

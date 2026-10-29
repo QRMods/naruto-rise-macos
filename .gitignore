@@ -16,3 +16,6 @@ __pycache__/
 # Generated: graphify index and debugging evidence (logs, samples).
 graphify-out/
 evidence/
+
+# Game artwork (copyrighted): kept local, never published.
+narutorise-icon.jpg
