@@ -1,0 +1,593 @@
+From 16a7011854f5c653121685eb2892a493909d147c Mon Sep 17 00:00:00 2001
+From: alantero <36408154+alantero@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 01:34:06 +0100
+Subject: [PATCH 1/5] Build and run on macOS (Apple Silicon) with the native
+ renderer on MoltenVK
+
+The native renderer's Vulkan backend on macOS, as one more POSIX system,
+built with this CMake as on Linux:
+
+- platform_posix.cpp: the macOS calls where Linux has its own (nanosleep,
+  QoS classes, Mach thread times and reads, _NSGetExecutablePath, dyld's
+  image list), and the window as the CAMetalLayer of an SDL Metal view.
+- present.inc: the Vulkan surface of that layer (VK_EXT_metal_surface).
+- backend.cpp: the loader and MoltenVK of the app's bundle, found as the
+  SDK finds them, loaded before volk looks for the loader by name.
+- app_entry.cpp, narutorise_app.h, supervisor.cpp: the executable's path,
+  the restart's pipe and the supervised child without Linux-only calls,
+  and std::min on operands of one type (size_t is not uint64_t there).
+- controls/service.cpp: libc++ has no std::atomic<std::shared_ptr>, so a
+  mutex guards the configuration where it is missing.
+- plume-engine.cmake: Plume's Objective-C++ part and its frameworks.
+- shader-cache.cmake: dxc-macos from dxc-bin, and the C compiler of
+  XenosRecomp from /usr/bin/c++.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/app_entry.cpp                    |   9 ++
+ app/src/controls/service.cpp             |  16 +++
+ app/src/data_migration.cpp               |   4 +-
+ app/src/data_paths.cpp                   |  11 +-
+ app/src/data_paths.h                     |   3 +
+ app/src/diagnostics/supervisor.cpp       |   8 +-
+ app/src/gpu/backend/vulkan/backend.cpp   |   3 +
+ app/src/gpu/backend/vulkan/present.inc   |   7 ++
+ app/src/gpu/common/platform.h            |  18 +++-
+ app/src/gpu/common/platform_posix.cpp    | 130 ++++++++++++++++++++++-
+ app/src/narutorise_app.h                 |   9 +-
+ tools/native-renderer/plume-engine.cmake |   8 ++
+ tools/native-renderer/shader-cache.cmake |  15 ++-
+ 13 files changed, 224 insertions(+), 17 deletions(-)
+
+diff --git a/app/src/app_entry.cpp b/app/src/app_entry.cpp
+index 2f42079..63e08c9 100644
+--- a/app/src/app_entry.cpp
++++ b/app/src/app_entry.cpp
+@@ -18,6 +18,9 @@
+ #include <memory>
+ #include <string>
+ #include <vector>
++#if defined(__APPLE__)
++#include <mach-o/dyld.h>
++#endif
+ 
+ #include <rex/cvar.h>
+ #include <rex/logging.h>
+@@ -92,6 +95,12 @@ int RunWindowedApp(int argc, char** argv) {
+   wchar_t path[32768]{};
+   const DWORD length = GetModuleFileNameW(nullptr, path, 32768);
+   const std::filesystem::path executable(std::wstring(path, length));
++#elif defined(__APPLE__)
++  uint32_t size = 0;
++  _NSGetExecutablePath(nullptr, &size);
++  std::string path(size, '\0');
++  _NSGetExecutablePath(path.data(), &size);
++  const auto executable = std::filesystem::weakly_canonical(path.c_str());
+ #else
+   const auto executable = std::filesystem::read_symlink("/proc/self/exe");
+ #endif
+diff --git a/app/src/controls/service.cpp b/app/src/controls/service.cpp
+index d9487a4..ace62f5 100644
+--- a/app/src/controls/service.cpp
++++ b/app/src/controls/service.cpp
+@@ -12,7 +12,23 @@
+ #endif
+ namespace narutorise::controls {
+ namespace {
++#if defined(__cpp_lib_atomic_shared_ptr)
+ std::atomic<std::shared_ptr<const Config>> current{std::make_shared<Config>()};
++#else
++// libc++ (macOS) has no std::atomic<std::shared_ptr>: a mutex guards the exchange.
++std::mutex current_mutex;
++std::shared_ptr<const Config> current_config = std::make_shared<Config>();
++struct {
++  std::shared_ptr<const Config> load() const {
++    std::lock_guard lock(current_mutex);
++    return current_config;
++  }
++  void store(std::shared_ptr<const Config> config) {
++    std::lock_guard lock(current_mutex);
++    current_config = std::move(config);
++  }
++} current;
++#endif
+ std::mutex backend_mutex;
+ std::string selected_backend = "sdl";
+ }  // namespace
+diff --git a/app/src/data_migration.cpp b/app/src/data_migration.cpp
+index 9c99d9c..5cadb33 100644
+--- a/app/src/data_migration.cpp
++++ b/app/src/data_migration.cpp
+@@ -499,7 +499,7 @@ void RebaseBundledSources(Json& state, const DataPaths& paths, const fs::path& m
+                 (source.at("kind") == "bundled_mod" && resource == "defaults/mods/pt-br"),
+             "Invalid bundled migration resource");
+     const auto previous = Path(source.at("from").get<std::string>());
+-    const auto current = Canonical(paths.install_dir / Path(resource));
++    const auto current = Canonical(paths.resources_dir / Path(resource));
+     if (previous == current) continue;
+     for (auto& entry : transaction.at("inventory")) {
+       const auto from = Path(entry.at("from").get<std::string>());
+@@ -794,7 +794,7 @@ Result<PreparedData> PrepareData(const DataPaths& paths, const Environment& env,
+     // the curated, immutable seed is eligible in isolated CLI/env sessions.
+     // This is a separate recoverable transaction, after legacy mods have been
+     // published, so a user's PT-BR never conflicts with the factory copy.
+-    const auto bundled = paths.install_dir / "defaults/mods/pt-br";
++    const auto bundled = paths.resources_dir / "defaults/mods/pt-br";
+     SafePath(prepared.paths.mods_dir / "pt-br");
+     SafePath(bundled);
+     if (!Exists(prepared.paths.mods_dir / "pt-br") && Exists(bundled)) {
+diff --git a/app/src/data_paths.cpp b/app/src/data_paths.cpp
+index 16aeeb8..5b0fc67 100644
+--- a/app/src/data_paths.cpp
++++ b/app/src/data_paths.cpp
+@@ -270,6 +270,15 @@ Result<DataPaths> ResolvePaths(const Environment& environment,
+     if (env.platform == Platform::kLinux && !env.appimage.empty())
+       paths.distribution_dir =
+           Resolve(ParsePath(env.appimage), paths.initial_cwd).parent_path();
++    paths.resources_dir = paths.install_dir;
++#if defined(__APPLE__)
++    // In a macOS app bundle the executable is in Contents/MacOS; the defaults
++    // and the data descriptor beside it are in Contents/Resources.
++    if (paths.install_dir.filename() == "MacOS" &&
++        paths.install_dir.parent_path().filename() == "Contents")
++      paths.distribution_dir = paths.resources_dir =
++          paths.install_dir.parent_path() / "Resources";
++#endif
+     paths.portable_descriptor = paths.distribution_dir / "data_location.json";
+     paths.session_override =
+         cli.data_root.has_value() || (env.data_root && !env.data_root->empty());
+@@ -305,7 +314,7 @@ Result<DataPaths> ResolvePaths(const Environment& environment,
+     paths.log_dir = paths.data_root / "logs";
+     paths.dlc_dir = paths.data_root / "dlc";
+     paths.mods_dir = paths.data_root / "mods";
+-    paths.defaults_path = paths.install_dir / "defaults/narutorise.toml";
++    paths.defaults_path = paths.resources_dir / "defaults/narutorise.toml";
+     return ApplyStorageOverrides(paths, env, cli, {});
+   } catch (const std::exception& e) {
+     return {std::nullopt, e.what()};
+diff --git a/app/src/data_paths.h b/app/src/data_paths.h
+index 76b9b55..5aba6a9 100644
+--- a/app/src/data_paths.h
++++ b/app/src/data_paths.h
+@@ -68,6 +68,9 @@ struct DataPaths {
+   std::filesystem::path data_root, config_path, user_data_root, log_dir,
+       dlc_dir, mods_dir, cache_root;
+   std::filesystem::path defaults_path;
++  // The distribution's own files (defaults/): install_dir, or Contents/Resources
++  // of a macOS app bundle, whose Contents/MacOS may hold code only (codesign).
++  std::filesystem::path resources_dir;
+   // user_descriptor is only discovered when higher-priority selection did
+   // not win; unavailable personal storage cannot break an isolated session.
+   std::filesystem::path portable_descriptor, user_descriptor,
+diff --git a/app/src/diagnostics/supervisor.cpp b/app/src/diagnostics/supervisor.cpp
+index dae6021..e0c96e3 100644
+--- a/app/src/diagnostics/supervisor.cpp
++++ b/app/src/diagnostics/supervisor.cpp
+@@ -21,7 +21,9 @@
+ #include <cerrno>
+ #include <csignal>
+ #include <fcntl.h>
++#if defined(__linux__)
+ #include <sys/prctl.h>
++#endif
+ #include <sys/resource.h>
+ #include <sys/wait.h>
+ #include <unistd.h>
+@@ -261,7 +263,7 @@ int RunSupervised(std::vector<std::string> arguments, const fs::path& executable
+     const auto path = fs::u8path(arguments[i].substr(prefix.size()));
+     arguments.erase(arguments.begin() + std::ptrdiff_t(i));
+     if (!AttachClient(path)) { std::fputs("Cannot attach incident supervisor channel\n", stderr); return 3; }
+-#ifndef _WIN32
++#if defined(__linux__)
+     prctl(PR_SET_PTRACER, getppid(), 0, 0, 0);
+ #endif
+     try {
+@@ -373,7 +375,7 @@ int Observe(Mapping& mapping, const fs::path& directory, const fs::path& executa
+ #else
+       const ssize_t size = ::read(output[0], buffer, sizeof(buffer)); if (size <= 0) break;
+ #endif
+-      const size_t keep = std::min(size_t(size), kLogLimit - std::min(stderr_bytes, uint64_t(kLogLimit)));
++      const size_t keep = std::min(size_t(size), size_t(kLogLimit - std::min(stderr_bytes, uint64_t(kLogLimit))));
+       stderr_file.write(buffer, std::streamsize(keep)); stderr_bytes += uint64_t(size);
+     }
+     const uint64_t next = channel.next.load(std::memory_order_acquire);
+@@ -498,7 +500,7 @@ int Observe(Mapping& mapping, const fs::path& directory, const fs::path& executa
+ #else
+     const ssize_t size = ::read(output[0], buffer, sizeof(buffer)); if (size <= 0) break;
+ #endif
+-    const auto keep = std::min(size_t(size), kLogLimit - std::min(stderr_bytes, uint64_t(kLogLimit)));
++    const auto keep = std::min(size_t(size), size_t(kLogLimit - std::min(stderr_bytes, uint64_t(kLogLimit))));
+     stderr_file.write(buffer, std::streamsize(keep)); stderr_bytes += uint64_t(size);
+   }
+ #ifdef _WIN32
+diff --git a/app/src/gpu/backend/vulkan/backend.cpp b/app/src/gpu/backend/vulkan/backend.cpp
+index a905557..5ecf0f7 100644
+--- a/app/src/gpu/backend/vulkan/backend.cpp
++++ b/app/src/gpu/backend/vulkan/backend.cpp
+@@ -1002,6 +1002,9 @@ bool Backend::Initialize(std::string& evidence, const RenderMode& mode) {
+   };
+   if (state_->render) return fail("duplicate-native-initialization");
+   if (const char* reason = RenderModeError(mode)) return fail(reason);
++#if defined(__APPLE__)
++  platform::PrepareVulkanLoader();
++#endif
+   state_->render = plume::CreateVulkanInterface();
+   if (!state_->render) return fail("native-vulkan-loader-or-instance-unavailable");
+   // A saved card that is gone (swapped, renamed by a driver) falls back to the
+diff --git a/app/src/gpu/backend/vulkan/present.inc b/app/src/gpu/backend/vulkan/present.inc
+index 7bbad1b..dd2ca91 100644
+--- a/app/src/gpu/backend/vulkan/present.inc
++++ b/app/src/gpu/backend/vulkan/present.inc
+@@ -155,6 +155,13 @@ VkResult CreateWindowSurface(VkInstance instance, const platform::NativeWindow&
+       return vkCreateXlibSurfaceKHR(instance, &info, nullptr, &surface);
+     }
+ #endif
++#if defined(__APPLE__)
++    case platform::NativeWindow::Kind::kMetal: {
++      VkMetalSurfaceCreateInfoEXT info{VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT};
++      info.pLayer = static_cast<const CAMetalLayer*>(window.window);
++      return vkCreateMetalSurfaceEXT(instance, &info, nullptr, &surface);
++    }
++#endif
+ #if defined(__linux__)
+     case platform::NativeWindow::Kind::kWayland: {
+       const auto create = reinterpret_cast<PFN_vkCreateWaylandSurfaceKHR>(
+diff --git a/app/src/gpu/common/platform.h b/app/src/gpu/common/platform.h
+index 1667443..7e78544 100644
+--- a/app/src/gpu/common/platform.h
++++ b/app/src/gpu/common/platform.h
+@@ -19,7 +19,8 @@ int64_t Ticks();
+ int64_t TickFrequency();
+ // Sleeps about `ticks` of that clock with the finest timer of the system (a
+ // high-resolution waitable timer of the calling thread on Windows,
+-// clock_nanosleep elsewhere). False when the timer could not be armed.
++// clock_nanosleep on Linux, nanosleep on macOS). False when the timer could not
++// be armed.
+ bool Sleep(int64_t ticks);
+ // One step of a spin wait.
+ void Pause();
+@@ -27,7 +28,8 @@ void Pause();
+ // The scheduling of the calling thread, for the worker pools. A pool never goes
+ // above the threads that publish the frames (the owner and the translator run
+ // at normal). Outside Windows an unprivileged thread cannot rise above normal:
+-// kLowest is the batch policy, kNormal and kAboveNormal the normal one.
++// kLowest is the batch policy (the utility QoS class on macOS), kNormal and
++// kAboveNormal the normal one.
+ enum class ThreadPriority { kLowest, kNormal, kAboveNormal };
+ void SetThreadPriority(ThreadPriority priority);
+ // The CPU times of a host thread by its native handle (rex::thread::Thread),
+@@ -39,12 +41,13 @@ bool ThreadTimes(void* native_thread, uint64_t& kernel_100ns, uint64_t& user_100
+ // A window to present to, by the handles of the system: what a Vulkan
+ // surface or a DXGI swap chain is made from. `handle` is the SDK's native
+ // handle of the window (rex::ui::Window::GetNativeWindowHandle: the HWND on
+-// Windows, the SDL_Window elsewhere), which ClientSize asks.
++// Windows, the SDL_Window elsewhere), which ClientSize asks. On macOS the
++// window is the CAMetalLayer of an SDL Metal view (MoltenVK's VK_EXT_metal_surface).
+ struct NativeWindow {
+-  enum class Kind { kNone, kWin32, kXlib, kWayland };
++  enum class Kind { kNone, kWin32, kXlib, kWayland, kMetal };
+   Kind kind = Kind::kNone;
+   void* display = nullptr;  // HINSTANCE, X11 Display*, wl_display*
+-  void* window = nullptr;   // HWND, X11 Window (the number), wl_surface*
++  void* window = nullptr;   // HWND, X11 Window (the number), wl_surface*, CAMetalLayer*
+   void* handle = nullptr;
+ };
+ NativeWindow WindowHandles(void* native_handle);
+@@ -78,4 +81,9 @@ std::vector<std::string> LoadedModules();
+ void ShowError(std::string_view title, std::string_view text);
+ // Ends the process at once with the code, without exit handlers.
+ [[noreturn]] void Terminate(uint32_t code);
++#if defined(__APPLE__)
++// Before the Vulkan backend loads Vulkan: the loader and MoltenVK of the app's
++// bundle (or of a Vulkan SDK), found as the SDK finds them for its own Vulkan.
++void PrepareVulkanLoader();
++#endif
+ }  // namespace gpu::platform
+diff --git a/app/src/gpu/common/platform_posix.cpp b/app/src/gpu/common/platform_posix.cpp
+index b8ecc26..b05e509 100644
+--- a/app/src/gpu/common/platform_posix.cpp
++++ b/app/src/gpu/common/platform_posix.cpp
+@@ -1,18 +1,42 @@
+-// The POSIX side of gpu/common/platform.h (Linux).
++// The POSIX side of gpu/common/platform.h (Linux and macOS).
+ #include "gpu/common/platform.h"
+ 
+ #include <cerrno>
+ #include <cstdio>
+ #include <ctime>
+ #include <string>
+-#include <link.h>
+ #include <pthread.h>
+ #include <sched.h>
+-#include <sys/uio.h>
+ #include <unistd.h>
+ #include <SDL3/SDL.h>
+ #include <fmt/format.h>
+ #include <rex/memory/utils.h>
++#if defined(__APPLE__)
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++#include <dlfcn.h>
++#include <mach-o/dyld.h>
++#include <mach/mach.h>
++#include <mach/mach_vm.h>
++#include <SDL3/SDL_metal.h>
++
++// The SDK's search for the Vulkan loader and MoltenVK (src/ui/vulkan/vulkan_moltenvk.h,
++// exported by librexruntime but not installed with its headers).
++namespace rex::ui::vulkan {
++struct MacOSVulkanRuntimePaths {
++  std::filesystem::path sdk_root;
++  std::filesystem::path spirv_tools_library;
++  std::filesystem::path moltenvk_icd;
++  std::vector<std::filesystem::path> loader_candidates;
++};
++MacOSVulkanRuntimePaths DetectMacOSVulkanRuntimePaths();
++void ConfigureMacOSVulkanEnvironment(const MacOSVulkanRuntimePaths& paths);
++}  // namespace rex::ui::vulkan
++#else
++#include <link.h>
++#include <sys/uio.h>
++#endif
+ 
+ namespace gpu::platform {
+ int64_t Ticks() {
+@@ -25,8 +49,13 @@ bool Sleep(int64_t ticks) {
+   if (ticks <= 0) return true;
+   timespec left{time_t(ticks / 1000000000), long(ticks % 1000000000)};
+   // A signal (the SDK's thread suspension) cuts the sleep short; the rest is slept.
++#if defined(__APPLE__)
++  while (nanosleep(&left, &left) == -1 && errno == EINTR) {
++  }
++#else
+   while (clock_nanosleep(CLOCK_MONOTONIC, 0, &left, &left) == EINTR) {
+   }
++#endif
+   return true;
+ }
+ void Pause() {
+@@ -38,14 +67,33 @@ void Pause() {
+ }
+ 
+ void SetThreadPriority(ThreadPriority priority) {
++#if defined(__APPLE__)
++  // macOS schedules by quality of service: utility work runs on the efficiency
++  // cores first, the default class beside the threads that publish the frames.
++  pthread_set_qos_class_self_np(priority == ThreadPriority::kLowest ? QOS_CLASS_UTILITY : QOS_CLASS_DEFAULT, 0);
++#else
+   // Switching between these two needs no privilege; nice values stay as they are.
+   const sched_param param{};
+   pthread_setschedparam(pthread_self(), priority == ThreadPriority::kLowest ? SCHED_BATCH : SCHED_OTHER, &param);
++#endif
+ }
+ bool ThreadTimes(void* native_thread, uint64_t& kernel_100ns, uint64_t& user_100ns) {
+   // A pthread_t is valid until the SDK joins the thread, at the first wait
+   // on an ended one: the caller asks only while the thread runs.
+   if (!native_thread) return false;
++#if defined(__APPLE__)
++  // The Mach thread of the pthread gives its user and system times apart.
++  thread_basic_info_data_t info{};
++  mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
++  const mach_port_t thread = pthread_mach_thread_np(reinterpret_cast<pthread_t>(native_thread));
++  if (thread == MACH_PORT_NULL ||
++      thread_info(thread, THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&info), &count) != KERN_SUCCESS)
++    return false;
++  auto to_100ns = [](const time_value_t& t) { return uint64_t(t.seconds) * 10000000 + uint64_t(t.microseconds) * 10; };
++  kernel_100ns = to_100ns(info.system_time);
++  user_100ns = to_100ns(info.user_time);
++  return true;
++#else
+   clockid_t clock{};
+   timespec used{};
+   if (pthread_getcpuclockid(reinterpret_cast<pthread_t>(native_thread), &clock) != 0 ||
+@@ -54,6 +102,7 @@ bool ThreadTimes(void* native_thread, uint64_t& kernel_100ns, uint64_t& user_100
+   kernel_100ns = 0;
+   user_100ns = uint64_t(used.tv_sec) * 10000000 + uint64_t(used.tv_nsec) / 100;
+   return true;
++#endif
+ }
+ 
+ // The window queries below run on the render thread, as their Win32 versions
+@@ -66,6 +115,30 @@ NativeWindow WindowHandles(void* native_handle) {
+   if (!sdl) return window;
+   window.handle = native_handle;
+   const SDL_PropertiesID props = SDL_GetWindowProperties(sdl);
++#if defined(__APPLE__)
++  // A Metal view on the window, made once on the main thread as Cocoa requires
++  // and kept in the window's properties; its CAMetalLayer backs the surface.
++  static std::mutex metal_views;
++  std::lock_guard lock(metal_views);
++  constexpr const char* kMetalView = "narutorise.metal_view";
++  auto view = static_cast<SDL_MetalView>(SDL_GetPointerProperty(props, kMetalView, nullptr));
++  if (!view) {
++    struct Make {
++      SDL_Window* window;
++      SDL_MetalView view;
++    } make{sdl, nullptr};
++    SDL_RunOnMainThread([](void* data) {
++      auto& m = *static_cast<Make*>(data);
++      m.view = SDL_Metal_CreateView(m.window);
++    }, &make, true);
++    view = make.view;
++    if (view) SDL_SetPointerProperty(props, kMetalView, view);
++  }
++  if (view) {
++    window.kind = NativeWindow::Kind::kMetal;
++    window.window = SDL_Metal_GetLayer(view);
++  }
++#else
+   if (void* display = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, nullptr)) {
+     window.kind = NativeWindow::Kind::kWayland;
+     window.display = display;
+@@ -75,6 +148,7 @@ NativeWindow WindowHandles(void* native_handle) {
+     window.display = display;
+     window.window = reinterpret_cast<void*>(uintptr_t(SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0)));
+   }
++#endif
+   if (!window.window) window = NativeWindow{};
+   return window;
+ }
+@@ -126,6 +200,18 @@ bool ReadableRegion(const void* address, uintptr_t& begin, uintptr_t& end) {
+   // /proc/self/maps reader.
+   const uintptr_t page = reinterpret_cast<uintptr_t>(address) & ~(kPageSize - 1);
+   char byte = 0;
++#if defined(__APPLE__)
++  // macOS has no process_vm_readv: the Mach read of the own task fails the same
++  // way, without a fault, and is as safe inside the signal handler.
++  mach_vm_size_t read = 0;
++  const kern_return_t result = mach_vm_read_overwrite(mach_task_self(), page, 1, mach_vm_address_t(&byte), &read);
++  if (result == KERN_SUCCESS && read == 1) {
++    begin = page;
++    end = page + kPageSize;
++    return true;
++  }
++  if (result == KERN_INVALID_ADDRESS || result == KERN_PROTECTION_FAILURE) return false;
++#else
+   iovec local{&byte, 1}, remote{reinterpret_cast<void*>(page), 1};
+   if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == 1) {
+     begin = page;
+@@ -133,6 +219,7 @@ bool ReadableRegion(const void* address, uintptr_t& begin, uintptr_t& end) {
+     return true;
+   }
+   if (errno == EFAULT) return false;
++#endif
+   size_t length = 0;
+   auto access = rex::memory::PageAccess::kNoAccess;
+   if (!rex::memory::QueryProtect(reinterpret_cast<void*>(page), length, access) ||
+@@ -143,6 +230,24 @@ bool ReadableRegion(const void* address, uintptr_t& begin, uintptr_t& end) {
+   return true;
+ }
+ 
++#if defined(__APPLE__)
++std::filesystem::path ExecutablePath() {
++  uint32_t size = 0;
++  _NSGetExecutablePath(nullptr, &size);
++  std::string path(size, '\0');
++  if (_NSGetExecutablePath(path.data(), &size) != 0) return {};
++  path.resize(std::strlen(path.c_str()));
++  std::error_code error;
++  auto canonical = std::filesystem::weakly_canonical(path, error);
++  return error ? std::filesystem::path(path) : canonical;
++}
++std::vector<std::string> LoadedModules() {
++  std::vector<std::string> modules;
++  for (uint32_t i = 0, count = _dyld_image_count(); i < count; ++i)
++    if (const char* name = _dyld_get_image_name(i)) modules.push_back(name);
++  return modules;
++}
++#else
+ std::filesystem::path ExecutablePath() {
+   std::error_code error;
+   auto path = std::filesystem::read_symlink("/proc/self/exe", error);
+@@ -160,6 +265,7 @@ std::vector<std::string> LoadedModules() {
+       &modules);
+   return modules;
+ }
++#endif
+ 
+ void ShowError(std::string_view title, std::string_view text) {
+   const std::string title_text(title), body(text);
+@@ -167,4 +273,22 @@ void ShowError(std::string_view title, std::string_view text) {
+   SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title_text.c_str(), body.c_str(), nullptr);
+ }
+ void Terminate(uint32_t code) { _exit(int(code)); }
++
++#if defined(__APPLE__)
++void PrepareVulkanLoader() {
++  static std::once_flag once;
++  std::call_once(once, [] {
++    const auto paths = rex::ui::vulkan::DetectMacOSVulkanRuntimePaths();
++    rex::ui::vulkan::ConfigureMacOSVulkanEnvironment(paths);
++    // MoltenVK compiles the Metal shaders of a new pipeline on several threads.
++    setenv("MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION", "1", 0);
++    // volk opens the loader by its name (libvulkan.1.dylib), which dyld finds in
++    // the system's folders or as an image already loaded under that name (an
++    // install name of @rpath/libvulkan.1.dylib): the app's loader is loaded
++    // first, and stays loaded.
++    for (const auto& candidate : paths.loader_candidates)
++      if (dlopen(candidate.c_str(), RTLD_NOW | RTLD_LOCAL)) break;
++  });
++}
++#endif
+ }  // namespace gpu::platform
+diff --git a/app/src/narutorise_app.h b/app/src/narutorise_app.h
+index dabe522..3210af7 100644
+--- a/app/src/narutorise_app.h
++++ b/app/src/narutorise_app.h
+@@ -1259,7 +1259,14 @@ class NarutoriseApp : public rex::ReXApp {
+     for (auto& value : values) argv.push_back(value.data());
+     argv.push_back(nullptr);
+     int wait_pipe[2];
+-    if (access(executable.c_str(), X_OK) == 0 && pipe2(wait_pipe, O_CLOEXEC) == 0) {
++#if defined(__APPLE__)
++    // macOS has no pipe2: the ends are made close-on-exec before the fork.
++    const bool piped = pipe(wait_pipe) == 0 && fcntl(wait_pipe[0], F_SETFD, FD_CLOEXEC) == 0 &&
++                       fcntl(wait_pipe[1], F_SETFD, FD_CLOEXEC) == 0;
++#else
++    const bool piped = pipe2(wait_pipe, O_CLOEXEC) == 0;
++#endif
++    if (access(executable.c_str(), X_OK) == 0 && piped) {
+       const auto child = fork();
+       if (child == 0) {
+         close(wait_pipe[1]);
+diff --git a/tools/native-renderer/plume-engine.cmake b/tools/native-renderer/plume-engine.cmake
+index a63019a..cef8773 100644
+--- a/tools/native-renderer/plume-engine.cmake
++++ b/tools/native-renderer/plume-engine.cmake
+@@ -139,4 +139,12 @@ if(NARUTORISE_NATIVE_VULKAN)
+         find_package(X11 REQUIRED)
+         target_link_libraries(native_renderer_plume_vulkan PUBLIC X11::X11)
+     endif()
++    # On macOS the Vulkan backend runs on MoltenVK: Plume's Cocoa and Metal part
++    # (plume_apple.mm) is Objective-C++.
++    if(APPLE)
++        enable_language(OBJCXX)
++        target_sources(native_renderer_plume_vulkan PRIVATE "${NATIVE_RENDERER_PLUME_SOURCE}/plume_apple.mm")
++        target_link_libraries(native_renderer_plume_vulkan PUBLIC "-framework Cocoa" "-framework QuartzCore"
++                              "-framework Metal")
++    endif()
+ endif()
+diff --git a/tools/native-renderer/shader-cache.cmake b/tools/native-renderer/shader-cache.cmake
+index 4502272..3dbf33a 100644
+--- a/tools/native-renderer/shader-cache.cmake
++++ b/tools/native-renderer/shader-cache.cmake
+@@ -32,8 +32,8 @@
+ # out/vulkan-tools).
+ #
+ # NARUTORISE_DXC is the DXC of the build host from dxc-bin (dxc.exe on Windows, dxc-linux on
+-# Linux), and NARUTORISE_DXC_ENV the command prefix that runs it and every tool that starts
+-# it: dxc-linux finds libdxcompiler.so through LD_LIBRARY_PATH.
++# Linux, dxc-macos on macOS), and NARUTORISE_DXC_ENV the command prefix that runs it and every
++# tool that starts it: dxc-linux finds libdxcompiler.so through LD_LIBRARY_PATH.
+ include_guard(GLOBAL)
+ include(ExternalProject)
+ enable_language(C)  # Zstandard.
+@@ -49,6 +49,15 @@ if(CMAKE_HOST_WIN32)
+ elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+   set(NARUTORISE_DXC "${_narutorise_dxc_bin}/bin/x64/dxc-linux")
+   set(NARUTORISE_DXC_ENV "${CMAKE_COMMAND}" -E env "LD_LIBRARY_PATH=${_narutorise_dxc_bin}/lib/x64")
++elseif(CMAKE_HOST_APPLE)
++  # dxc-macos looks for libdxcompiler.dylib in ../lib (its rpath), and dxc-bin keeps
++  # it in lib/arm64. A copy with that layout in the build folder needs no
++  # DYLD_LIBRARY_PATH, which macOS drops when it starts a protected binary (python3).
++  set(_narutorise_dxc_copy "${CMAKE_BINARY_DIR}/dxc-macos")
++  file(COPY "${_narutorise_dxc_bin}/bin/arm64/dxc-macos" DESTINATION "${_narutorise_dxc_copy}/bin")
++  file(COPY "${_narutorise_dxc_bin}/lib/arm64/" DESTINATION "${_narutorise_dxc_copy}/lib")
++  set(NARUTORISE_DXC "${_narutorise_dxc_copy}/bin/dxc-macos")
++  set(NARUTORISE_DXC_ENV)
+ else()
+   message(FATAL_ERROR "The shader cache of the native renderer has no DXC for ${CMAKE_HOST_SYSTEM_NAME}")
+ endif()
+@@ -121,6 +130,8 @@ function(narutorise_shader_cache target source)
+   # (the in-process cache mode, not the single-file mode the chain uses) needs dxil.dll,
+   # which dxc-bin has on Windows only.
+   string(REGEX REPLACE "clang\\+\\+" "clang" c_compiler "${CMAKE_CXX_COMPILER}")
++  # On macOS the compiler is /usr/bin/c++, whose C side is /usr/bin/cc.
++  string(REGEX REPLACE "c\\+\\+$" "cc" c_compiler "${c_compiler}")
+   if(CMAKE_HOST_WIN32)
+     set(recomp_dxil ON)
+   else()
+-- 
+2.50.1 (Apple Git-155)
+

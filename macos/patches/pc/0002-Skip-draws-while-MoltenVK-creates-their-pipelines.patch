@@ -1,0 +1,110 @@
+From e76036772a078c61f155c9d89f408b8630a13177 Mon Sep 17 00:00:00 2001
+From: alantero <36408154+alantero@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 01:34:36 +0100
+Subject: [PATCH 2/5] Skip draws while MoltenVK creates their pipelines
+
+On MoltenVK a new graphics pipeline translates its shaders to Metal and
+compiles them, from tens to hundreds of milliseconds on the render thread.
+Every fence wait of the title waited behind it, so the frame froze each
+time the game showed something new.
+
+On macOS the Vulkan backend now takes pipelines like the D3D12 backend: a
+pipeline that is not ready goes to the asynchronous threads, at normal
+priority, and its draw is skipped until the pipeline exists.
+REX_NATIVE_PSO_ASYNC=prefetch keeps the previous behavior. Other systems
+are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/gpu/backend/vulkan/draw.inc | 27 ++++++++++++++++++++++++---
+ app/src/gpu/d3d/draw.cpp            |  9 +++++++++
+ 2 files changed, 33 insertions(+), 3 deletions(-)
+
+diff --git a/app/src/gpu/backend/vulkan/draw.inc b/app/src/gpu/backend/vulkan/draw.inc
+index 4dd5ab0..55b234c 100644
+--- a/app/src/gpu/backend/vulkan/draw.inc
++++ b/app/src/gpu/backend/vulkan/draw.inc
+@@ -195,18 +195,34 @@ bool Backend::DrawIndexed(const DrawRequest& r, uint64_t& fence, std::string& ev
+   const uint64_t key = keyed ? prefetched->key : VulkanPipelineKey(r.vs, r.ps, layout_id, state_words);
+   auto& pipeline = s.pipelines[key];
+   const bool created = !pipeline;
++  bool skip_draw = false;  // The pipeline is being created asynchronously (skip take).
+   if (!pipeline) {
+     if (keyed && !words()) { s.pipelines.erase(key); return fail("native-draw-topology-uncovered"); }
+     // The description is copied only for a pipeline the backend lacks.
+     const PipelineDesc desc{r.vs, r.ps, r.elements, layout_id, state_words};
+     const uint64_t triple = TripleKey(r.vs.key, r.ps.key, layout_id);
++#if defined(__APPLE__)
++    // The skip take, as the D3D12 backend: a pipeline not ready is posted to
++    // the asynchronous threads and the draw is recorded without itself. On
++    // MoltenVK a creation costs tens to hundreds of milliseconds on this
++    // thread, which every fence wait of the title waits behind. The skipped
++    // draws come back as soon as their pipelines exist, so the threads keep
++    // the normal priority.
++    auto take = s.pipeline_set.Take(key, triple, r.pipeline_take);
++    skip_draw = take.skip;
++    if (take.post) s.pipeline_set.Post(key, PipelineDesc(desc), false, false);
++#else
+     // Normal and diagnostic draws both remain visible on Vulkan. Never skip
+     // a draw because a pipeline compilation is pending.
+     auto take = s.pipeline_set.Take(key, triple, r.pipeline_take == DrawRequest::PipelineTake::kSkip ?
+         DrawRequest::PipelineTake::kPrefetch : r.pipeline_take);
++#endif
+     pipeline = std::move(take.pipeline);
+     s.pipeline_origins[key] = take.origin ? take.origin : "created";
+-    if (!pipeline) {
++    if (skip_draw) {
++      s.pipelines.erase(key);  // `pipeline` is not used below.
++      s.pipeline_origins.erase(key);
++    } else if (!pipeline) {
+       const auto begin = std::chrono::steady_clock::now();
+       const auto result = MakeGraphicsPipeline(s.vulkan->vk, s.draw_layout, desc, s.vertex_locations, pipeline);
+       if (!result.ok) { s.pipelines.erase(key); return fail(result.reason, VkResult(result.code)); }
+@@ -214,8 +230,10 @@ bool Backend::DrawIndexed(const DrawRequest& r, uint64_t& fence, std::string& ev
+       s.pipeline_create_us[key] = micros;
+       s.pipeline_origins[key] = s.pipeline_set.NoteCreated(take, triple, micros);
+     }
+-    s.pipeline_worlds[key] = WorldKey();
+-    s.pipeline_descs.emplace(key, desc);
++    if (!skip_draw) {
++      s.pipeline_worlds[key] = WorldKey();
++      s.pipeline_descs.emplace(key, desc);
++    }
+   }
+   if (!ApplyDrawConstants(r.vs_constants, r.vs_constants_delta, s.vs_block) ||
+       !ApplyDrawConstants(r.ps_constants, r.ps_constants_delta, s.ps_block)) return fail("native-draw-constants");
+@@ -223,6 +241,9 @@ bool Backend::DrawIndexed(const DrawRequest& r, uint64_t& fence, std::string& ev
+   // this draw's descriptors and retaining its resources.
+   for (const auto& t : r.textures) if (!t.resolved && !t.data.empty())
+     if (!UploadSampled(t, evidence)) return false;
++  // A skipped draw keeps the constants and the texture copies later draws
++  // build on, and records nothing (its pass needs the pipeline's).
++  if (skip_draw) return true;
+   const char* reason = nullptr; VkResult result = VK_SUCCESS;
+   if (!s.OpenBatch(reason, result)) return fail(reason, result);
+   s.batch.list->setFramebuffer(nullptr);
+diff --git a/app/src/gpu/d3d/draw.cpp b/app/src/gpu/d3d/draw.cpp
+index 96d2f25..63785ad 100644
+--- a/app/src/gpu/d3d/draw.cpp
++++ b/app/src/gpu/d3d/draw.cpp
+@@ -368,8 +368,17 @@ DrawRequest::PipelineTake BatchedPipelineTake() {
+     const char* text = std::getenv("REX_NATIVE_PSO_ASYNC");
+     const std::string_view option = text ? text : "";
+     if (option == "0") return DrawRequest::PipelineTake::kSync;
++#if defined(__APPLE__)
++    // On MoltenVK a new pipeline translates its shaders to Metal and compiles
++    // them, up to hundreds of milliseconds: waiting for it froze the frame each
++    // time the game showed something new. The draw of a pipeline not ready
++    // skips until its creation ends (REX_NATIVE_PSO_ASYNC=prefetch waits).
++    if (option == "prefetch") return DrawRequest::PipelineTake::kPrefetch;
++    return DrawRequest::PipelineTake::kSkip;
++#else
+     if (option == "1" && Diagnostics()) return DrawRequest::PipelineTake::kSkip;
+     return DrawRequest::PipelineTake::kPrefetch;
++#endif
+   }();
+   return value;
+ }
+-- 
+2.50.1 (Apple Git-155)
+

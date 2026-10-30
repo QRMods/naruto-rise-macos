@@ -15,9 +15,7 @@ PC = ROOT / 'upstream/naruto-rise-recomp'
 PS5 = ROOT / 'upstream/naruto-ps5'
 SDK = PC / 'sdk'
 PLUME = ROOT / 'upstream/plume'
-XENOS_THIRDPARTY = PC / 'tools/xenosrecomp/thirdparty'
 BUILD = ROOT / 'build'
-SHADERS = BUILD / 'native-shaders'
 APP = ROOT / 'dist/Naruto Rise of a Ninja.app'
 ENV = dict(os.environ)
 if Path('/Applications/Xcode.app/Contents/Developer').is_dir():
@@ -67,85 +65,142 @@ def apply_patches(repo, patches):
         shutil.copy2(path, record / f'{index:02d}-{path.name}')
 
 
-def native_shaders(jobs):
-    """The PC port's native renderer shaders, translated and compiled at build time.
-
-    The same chain as its shader-cache.cmake (XenosRecomp fork, DXC, spirv-val,
-    smol-v and Zstandard), with the macOS DXC of the fork's dxc-bin.
-    """
-    tools = BUILD / 'shader-tools'
-    tools.mkdir(parents=True, exist_ok=True)
-    run('cmake', '-S', PC / 'tools/xenosrecomp', '-B', BUILD / 'xenosrecomp', '-DCMAKE_BUILD_TYPE=Release',
-        '-DCMAKE_OSX_ARCHITECTURES=arm64', '-DXENOS_RECOMP_DXIL=OFF')
-    run('cmake', '--build', BUILD / 'xenosrecomp', '--target', 'XenosRecomp', '--parallel', jobs)
+def spirv_val(jobs):
+    """spirv-val of the SDK's SPIRV-Tools, which the shader cache of the native renderer checks with."""
     spirv = SDK / 'thirdparty'
     run('cmake', '-S', spirv / 'spirv-tools', '-B', BUILD / 'spirv-tools', '-DCMAKE_BUILD_TYPE=Release',
         '-DCMAKE_OSX_ARCHITECTURES=arm64', f'-DSPIRV-Headers_SOURCE_DIR={spirv / "spirv-headers"}',
         '-DSPIRV_SKIP_TESTS=ON', '-DSPIRV_WERROR=OFF')
     run('cmake', '--build', BUILD / 'spirv-tools', '--target', 'spirv-val', '--parallel', jobs)
-    spirv_val = BUILD / 'spirv-tools/tools/spirv-val'
-    zstd = BUILD / 'xenosrecomp/thirdparty/zstd/build/cmake/lib/libzstd.a'
-    native = PC / 'tools/native-renderer'
-    run('clang++', '-std=c++20', '-O2', f'-I{XENOS_THIRDPARTY / "zstd/lib"}', native / 'shader-compress.cpp', zstd,
-        '-o', tools / 'shader-compress')
-    run('clang++', '-std=c++20', '-O2', f'-I{XENOS_THIRDPARTY / "smol-v/source"}', native / 'smolv-encode.cpp',
-        XENOS_THIRDPARTY / 'smol-v/source/smolv.cpp', '-o', tools / 'smolv-encode')
-    dxc = tools / 'dxc'
-    dxc.write_text('#!/bin/sh\n# DXC for macOS from XenosRecomp\'s dxc-bin, with its dylib beside it.\n'
-                   f'DYLD_LIBRARY_PATH="{XENOS_THIRDPARTY / "dxc-bin/lib/arm64"}" '
-                   f'exec "{XENOS_THIRDPARTY / "dxc-bin/bin/arm64/dxc-macos"}" "$@"\n')
-    dxc.chmod(0o755)
-    # The shader store keeps each translated and compiled shader across builds.
-    run(sys.executable, '-I', native / 'build-shader-cache.py', ROOT / 'game/xeshader.sdb',
-        BUILD / 'xenosrecomp/XenosRecomp/XenosRecomp', PC / 'tools/xenosrecomp/XenosRecomp/shader_common.h',
-        dxc, SHADERS, BUILD / 'shader-store', '--compressor', tools / 'shader-compress',
-        '--spirv-val', spirv_val, '--smolv-encode', tools / 'smolv-encode', '--passes', PC / 'app/src/gpu/backend')
+    return BUILD / 'spirv-tools/tools/spirv-val'
 
 
 def manifest():
-    dest = BUILD / 'codegen'
-    dest.mkdir(parents=True, exist_ok=True)
-    quote = lambda p: json.dumps(str(p))
-    text = '[project]\nname = "narutorise"\nsdk_version = "0.10.0"\ngame_root = ' + quote(ROOT / 'game') + '\n\n'
-    for section, filename, output, seeds in (
-        ('[entrypoint]', 'default.xex', 'default', 'analysis-seeds.toml'),
-        ('[[modules]]', 'ai2c.dll', 'ai2c', 'ai2c-seeds.toml'),
-    ):
-        text += section + '\n'
-        if section == '[[modules]]':
-            text += 'guest_path = "ai2c.dll"\n'
-        text += 'file_path = ' + quote(ROOT / 'game' / filename) + '\n'
-        text += f'out_directory_path = "generated/{output}"\n'
-        text += 'includes = [' + quote(PC / 'app' / seeds) + ']\n\n'
-    target = dest / 'narutorise_manifest.toml'
+    """The PC port's codegen manifest for the local game files.
+
+    A copy beside the PC port's (the codegen writes the module targets relative
+    to the app folder), excluded from that checkout's Git status, whose game
+    paths point at game/. A module whose file the disc lacks (the character DLC
+    revisions, ai2c1-3.dll) is left out: the base game runs without them.
+    """
+    app = PC / 'app'
+    quote = lambda path: json.dumps(str(path))
+    value = lambda line: json.loads(line.split('=', 1)[1])
+    # The manifest's sections, each from its header to the next one.
+    sections = [[]]
+    for line in (app / 'narutorise_manifest.toml').read_text().splitlines():
+        if line.startswith('['):
+            sections.append([])
+        sections[-1].append(line)
+    lines = []
+    for section in sections:
+        files = [value(line) for line in section if line.split('=', 1)[0].strip() == 'file_path']
+        if section and section[0].strip() == '[[modules]]' and not (ROOT / 'game' / Path(files[0]).name).is_file():
+            continue
+        for line in section:
+            key = line.split('=', 1)[0].strip()
+            if key == 'game_root':
+                line = 'game_root = ' + quote(ROOT / 'game')
+            elif key == 'file_path':
+                line = 'file_path = ' + quote(ROOT / 'game' / Path(value(line)).name)
+            lines.append(line)
+    text = '\n'.join(lines) + '\n'
+    target = app / 'narutorise_manifest.macos.toml'
+    exclude = PC / '.git/info/exclude'
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    if target.name not in (exclude.read_text() if exclude.exists() else ''):
+        with exclude.open('a') as stream:
+            stream.write(f'/app/{target.name}\n')
     if not target.exists() or target.read_text() != text:
         target.write_text(text)
     return target
 
 
+def settings_text(base, overrides):
+    """The settings of `base` with each `key = value` line of `overrides` in place of its own."""
+    lines = base.splitlines()
+    keys = {line.split('=', 1)[0].strip(): index for index, line in enumerate(lines)
+            if '=' in line and not line.lstrip().startswith('#')}
+    for line in overrides.splitlines():
+        if '=' not in line or line.lstrip().startswith('#'):
+            continue
+        key = line.split('=', 1)[0].strip()
+        if key in keys:
+            lines[keys[key]] = line
+        else:
+            lines.append(line)
+    return '\n'.join(lines) + '\n'
+
+
+def system_language():
+    """The Mac's first preferred language as the settings name it.
+
+    The menus' language (launcher_language) and the game's (user_language, an
+    Xbox 360 language code: 1 English, 3 German, 4 French, 5 Spanish,
+    6 Italian); English where the game or the menus lack it.
+    """
+    try:
+        listed = subprocess.check_output(['defaults', 'read', '-g', 'AppleLanguages'], text=True)
+        first = listed.split('"')[1].lower()
+    except (subprocess.CalledProcessError, OSError, IndexError):
+        first = 'en'
+    prefix = first.split('-')[0]
+    menus = {'es': 'es', 'fr': 'fr', 'de': 'de', 'it': 'it', 'ru': 'ru', 'pt': 'pt_BR'}.get(prefix, 'en')
+    game = {'de': 3, 'fr': 4, 'es': 5, 'it': 6}.get(prefix, 1)
+    return menus, game
+
+
 def package():
-    binaries = BUILD / 'macos'
+    binaries = BUILD / 'app'
     contents = APP / 'Contents'
     macos = contents / 'MacOS'
     resources = contents / 'Resources'
     macos.mkdir(parents=True, exist_ok=True)
     resources.mkdir(parents=True, exist_ok=True)
-    for name in ('narutorise', 'libnarutorise_ai2c.dylib', 'librexruntime.dylib', 'librexgpu-xenos.dylib'):
-        shutil.copy2(binaries / name, macos / name)
-    if (macos / 'vulkan').exists():
-        shutil.rmtree(macos / 'vulkan')
+    shutil.copy2(binaries / 'narutorise', macos / 'narutorise')
+    for library in binaries.glob('*.dylib'):
+        shutil.copy2(library, macos / library.name)
     shutil.copytree(binaries / 'vulkan', resources / 'vulkan', dirs_exist_ok=True)
-    config = (ROOT / 'macos/narutorise.toml').read_text()
-    for key, path in (('game_data_root', ROOT / 'game'), ('user_data_root', ROOT / 'user'), ('cache_root', ROOT / 'user/cache')):
-        config += '\n' + key + ' = ' + json.dumps(str(path)) + '\n'
-    config += '\nlog_file = ' + json.dumps(str(ROOT / 'user/logs/narutorise.log')) + '\n'
-    (resources / 'narutorise.toml').write_text(config)
+    # The PC port's default settings with the macOS ones over them (keyboard and
+    # mouse, a window, 30 FPS), which the game copies into a new data folder.
+    menus, game = system_language()
+    defaults = settings_text((PC / 'app/narutorise.toml').read_text(),
+                             (ROOT / 'macos/narutorise.toml').read_text() +
+                             f'\nlauncher_language = "{menus}"\nuser_language = {game}\n')
+    shutil.copytree(binaries / 'defaults', resources / 'defaults', dirs_exist_ok=True)
+    (resources / 'defaults/narutorise.toml').write_text(defaults)
+    # The data folder is user/ of this checkout (settings, saves, logs and caches),
+    # and the game is game/: a descriptor beside the executable selects the folder,
+    # and the settings name the game and the folders the saves were always in.
+    (resources / 'data_location.json').write_text(json.dumps({'version': 1, 'mode': 'custom', 'path': str(ROOT / 'user')}))
+    # In an app bundle the game reads both from Resources (Contents/MacOS holds
+    # code only); earlier packages kept them beside the executable.
+    for name in ('defaults', 'data_location.json'):
+        stale = macos / name
+        if stale.is_symlink() or stale.is_file():
+            stale.unlink()
+        elif stale.is_dir():
+            shutil.rmtree(stale)
+    roots = {'user_data_root': ROOT / 'user', 'cache_root': ROOT / 'user/cache', 'custom_game_root': ROOT / 'game'}
     user_config = ROOT / 'user/narutorise.toml'
-    user_config.parent.mkdir(exist_ok=True)
-    (ROOT / 'user/logs').mkdir(exist_ok=True)
+    (ROOT / 'user/logs').mkdir(parents=True, exist_ok=True)
     if not user_config.exists():
-        user_config.write_text(config)
-    (macos / 'narutorise.toml').unlink(missing_ok=True)
+        user_config.write_text(defaults + ''.join(f'{key} = {json.dumps(str(path))}\n' for key, path in roots.items()))
+    else:
+        # Settings from an earlier version: the keys this one adds (the game's
+        # folder, the menus' language, the macOS defaults it lacks) are added;
+        # the others stay as they are.
+        text = user_config.read_text()
+        present = {line.split('=', 1)[0].strip() for line in text.splitlines()
+                   if '=' in line and not line.lstrip().startswith('#')}
+        wanted = [('custom_game_root', json.dumps(str(ROOT / 'game'))), ('launcher_language', json.dumps(menus))]
+        wanted += [(line.split('=', 1)[0].strip(), line.split('=', 1)[1].strip())
+                   for line in (ROOT / 'macos/narutorise.toml').read_text().splitlines()
+                   if '=' in line and not line.lstrip().startswith('#')]
+        added = ''.join(f'{key} = {value}\n' for key, value in wanted if key not in present)
+        if added:
+            with user_config.open('a') as stream:
+                stream.write('\n' + added)
     if (macos / 'logs').exists():
         shutil.copytree(macos / 'logs', ROOT / 'evidence/initial-app-logs', dirs_exist_ok=True)
         shutil.rmtree(macos / 'logs')
@@ -155,7 +210,7 @@ def package():
         'CFBundleDisplayName': 'Naruto Rise of a Ninja',
         'CFBundleExecutable': 'narutorise',
         'CFBundlePackageType': 'APPL',
-        'CFBundleShortVersionString': '0.1.0',
+        'CFBundleShortVersionString': '0.4.0',
         'CFBundleVersion': '1',
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '26.0',
@@ -195,18 +250,19 @@ def main():
     checkout(PLUME, sources['plume'])
     run('git', '-C', SDK, 'submodule', 'update', '--init', '--depth', '1', '--jobs', args.jobs)
     run('git', '-C', PC, 'submodule', 'update', '--init', '--depth', '1', '--jobs', args.jobs,
-        *(f'tools/xenosrecomp/thirdparty/{name}' for name in ('dxc-bin', 'fmt', 'smol-v', 'xxHash', 'zstd')))
+        *(f'tools/xenosrecomp/thirdparty/{name}' for name in ('dxc-bin', 'fmt', 'smol-v', 'xxHash', 'zstd')),
+        'third_party/rmlui', 'third_party/freetype')
     run('git', '-C', PLUME, 'submodule', 'update', '--init', '--depth', '1', '--jobs', args.jobs,
         'contrib/volk', 'contrib/Vulkan-Headers', 'contrib/VulkanMemoryAllocator')
-    # The PC port's native renderer on macOS: its Vulkan surface, guest memory
-    # reads without SEH, and the frame-rate line in the log.
-    apply_patches(PC, [ROOT / 'macos/naruto-native-macos.patch'])
-    # Same order as the PS5 port: the PC port's SDK patches, then the PS5 port's
-    # (16 KB page write watches, Vulkan submission and descriptor work, frame
-    # pacing, save pictures), then the macOS-specific ones.
-    apply_patches(SDK, [*sorted((PC / 'patches/sdk').glob('*.patch')), PS5 / 'ps5/patches/rexglue-ps5.patch',
-                        ROOT / 'macos/rexglue-macos.patch', ROOT / 'macos/rexglue-vulkan-presenter.patch',
-                        ROOT / 'macos/rexglue-macos-window.patch', ROOT / 'macos/rexglue-posix-wait.patch'])
+    # The PC port on macOS (macos/patches/pc, one commit each, written to go
+    # upstream): the platform layer and build on Apple Silicon, and the skipped
+    # draws while MoltenVK creates a pipeline.
+    apply_patches(PC, sorted((ROOT / 'macos/patches/pc').glob('*.patch')))
+    # The PC port's SDK patches, then macos/patches/sdk: the PS5 port's (16 KB
+    # page write watches, Vulkan submission and descriptor work, frame pacing),
+    # adapted to follow them, and the macOS-specific ones.
+    apply_patches(SDK, [*sorted((PC / 'patches/sdk').glob('*.patch')),
+                        *sorted((ROOT / 'macos/patches/sdk').glob('*.patch'))])
     if not (ROOT / 'game/default.xex').is_file():
         iso = args.iso
         if iso is None:
@@ -220,11 +276,25 @@ def main():
         '-DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON', '-DREXGLUE_ENABLE_TRACY=OFF',
         '-DREXGLUE_ENABLE_FIDELITYFX=OFF', '-DREXGLUE_ENABLE_PERF_COUNTERS=ON')
     run('cmake', '--build', BUILD / 'sdk', '--target', 'install', '--parallel', args.jobs)
-    run(BUILD / 'sdk-install/bin/rexglue', 'codegen', manifest())
-    native_shaders(args.jobs)
-    run('cmake', '-S', ROOT / 'macos', '-B', BUILD / 'macos', '-DCMAKE_BUILD_TYPE=Release',
-        f'-DCMAKE_PREFIX_PATH={BUILD / "sdk-install"}', '-DNARUTORISE_NATIVE=ON')
-    run('cmake', '--build', BUILD / 'macos', '--parallel', args.jobs)
+    # The recompiled code first: the app's CMake takes its sources when it configures.
+    run(BUILD / 'sdk-install/bin/rexglue', 'codegen', manifest(), cwd=PC / 'app')
+    # The PC port's build reruns the codegen with its own manifest (which names
+    # the DLC modules) unless its stamp says the code is current: it is.
+    (PC / 'app/generated/default/codegen.build.stamp').touch()
+    validator = spirv_val(args.jobs)
+    # The PC port's own CMake, as on Linux: the native renderer on Vulkan
+    # (MoltenVK), its shaders translated from game/xeshader.sdb.
+    run('cmake', '-S', PC / 'app', '-B', BUILD / 'app', '-DCMAKE_BUILD_TYPE=Release',
+        '-DCMAKE_OSX_ARCHITECTURES=arm64', f'-DCMAKE_PREFIX_PATH={BUILD / "sdk-install"}',
+        '-DNARUTORISE_NATIVE_RENDERER_BOOTSTRAP=ON', f'-DNATIVE_RENDERER_PLUME_SOURCE={PLUME}',
+        f'-DNARUTORISE_GAME_DIR={ROOT / "game"}',
+        f'-DNARUTORISE_SHADER_STORE={BUILD / "shader-store"}', f'-DNARUTORISE_SPIRV_VAL={validator}',
+        # Sentry reports go to the PC port's own project: a macOS build sends none.
+        '-DNARUTORISE_ENABLE_SENTRY=OFF')
+    # The game and its recompiled guest modules (narutorise_ai2c, and a DLC's).
+    modules = sorted(f'narutorise_{folder.name}' for folder in (PC / 'app/generated').iterdir()
+                     if folder.name != 'default' and (folder / 'sources.cmake').is_file())
+    run('cmake', '--build', BUILD / 'app', '--target', 'narutorise', *modules, '--parallel', args.jobs)
     package()
 
 

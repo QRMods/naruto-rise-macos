@@ -1,0 +1,44 @@
+--- a/src/input/mnk/mnk_input_driver.cpp
++++ b/src/input/mnk/mnk_input_driver.cpp
+@@ -22,6 +22,7 @@
+ #include <cmath>
+ #include <cstdlib>
+ #include <cstring>
++#include <mutex>
+ #include <string_view>
+ 
+ REXCVAR_DEFINE_BOOL(mnk_mode, false, "Input", "Enable keyboard/mouse controller emulation");
+@@ -61,7 +62,13 @@
+ 
+ namespace rex::input::mnk {
+ namespace {
++#if defined(__cpp_lib_atomic_shared_ptr)
+ std::atomic<std::shared_ptr<const Profile>> host_profile;
++#else
++// libc++ (macOS) has no std::atomic<std::shared_ptr>: a mutex guards the exchange.
++std::mutex host_profile_mutex;
++std::shared_ptr<const Profile> host_profile;
++#endif
+ double MotionValue(std::string_view token, double dx, double dy) {
+   if (token == "MouseUp") return std::max(0.0, -dy);
+   if (token == "MouseDown") return std::max(0.0, dy);
+@@ -80,8 +87,19 @@
+   return result;
+ }
+ }
++#if defined(__cpp_lib_atomic_shared_ptr)
+ void SetProfile(std::shared_ptr<const Profile> profile) { host_profile.store(std::move(profile)); }
+ std::shared_ptr<const Profile> GetProfile() { return host_profile.load(); }
++#else
++void SetProfile(std::shared_ptr<const Profile> profile) {
++  std::lock_guard lock(host_profile_mutex);
++  host_profile = std::move(profile);
++}
++std::shared_ptr<const Profile> GetProfile() {
++  std::lock_guard lock(host_profile_mutex);
++  return host_profile;
++}
++#endif
+ double MouseCameraSensitivity() { auto p = GetProfile(); return p ? p->sensitivity : REXCVAR_GET(mnk_sensitivity); }
+ 
+ namespace {

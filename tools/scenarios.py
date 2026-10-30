@@ -22,7 +22,13 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'dist/Naruto Rise of a Ninja.app/Contents/MacOS/narutorise'
-LOG = ROOT / 'user/logs/narutorise.log'
+LOGS = ROOT / 'user/logs'
+
+
+def session_log(started):
+    """The text of the log the game began after `started` (one file per session, narutorise_NNN.log)."""
+    logs = [log for log in LOGS.glob('narutorise*.log') if log.stat().st_mtime >= started]
+    return max(logs, key=lambda log: log.stat().st_mtime).read_bytes().decode('utf-8', 'replace') if logs else ''
 SANDBOX = ROOT / 'build/scenario-user'
 DEVICE = 1296976640  # The keyboard and mouse device of the recordings.
 BUTTONS = {'up': 0x1, 'down': 0x2, 'left': 0x4, 'right': 0x8, 'start': 0x10, 'back': 0x20,
@@ -74,7 +80,7 @@ def sandbox(cold):
     """A copy of the saves (user/<profile ids>), with the pipeline cache kept unless cold."""
     SANDBOX.mkdir(parents=True, exist_ok=True)
     for entry in (ROOT / 'user').iterdir():
-        if entry.is_dir() and entry.name not in ('logs', 'cache', 'replays'):
+        if entry.is_dir() and entry.name not in ('logs', 'cache', 'replays', 'incidents'):
             shutil.rmtree(SANDBOX / entry.name, ignore_errors=True)
             shutil.copytree(entry, SANDBOX / entry.name)
     if cold:
@@ -83,10 +89,11 @@ def sandbox(cold):
 
 
 def run(name, replay, seconds, tail, target, cvars):
-    start = LOG.stat().st_size if LOG.exists() else 0
+    started = time.time()
     env = dict(os.environ, REX_NATIVE_INPUT_REPLAY=str(replay), REX_NATIVE_FPS_TITLE='1')
     process = subprocess.Popen([BINARY, f'--user_data_root={SANDBOX}', f'--cache_root={SANDBOX / "cache"}',
-                                *cvars], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                '--show_startup_menu=false', *cvars], env=env,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         time.sleep(seconds)
     finally:
@@ -95,7 +102,7 @@ def run(name, replay, seconds, tail, target, cvars):
             process.wait(10)
         except subprocess.TimeoutExpired:
             process.kill()
-    text = LOG.read_bytes()[start:].decode('utf-8', 'replace') if LOG.exists() else ''
+    text = session_log(started)
     samples = [m.groups() for m in map(SAMPLE.match, text.splitlines()) if m]
     window = [(float(fps), float(peak)) for _, fps, _, peak in samples[-int(tail * 2):]]
     if not window:

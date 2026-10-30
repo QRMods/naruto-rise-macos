@@ -1,5 +1,5 @@
 {
-  "pc": {"url": "https://github.com/jorjbarbosa/naruto-rise-recomp.git", "commit": "2a22861618fb90e42265d108f7a570c256941e00"},
+  "pc": {"url": "https://github.com/jorjbarbosa/naruto-rise-recomp.git", "commit": "283e0131d3116c7b57dc5bf158992f73b887dfbb"},
   "ps5": {"url": "https://github.com/mshivam019/naruto-ps5.git", "commit": "621030302f6b0fb17fded7793d0751fc680e6c8b"},
   "sdk": {"url": "https://github.com/rexglue/rexglue-sdk.git", "commit": "c94f5ebdcb3c9d1a460ca48e04f9758448f8d518"},
   "plume": {"url": "https://github.com/renderbag/plume.git", "commit": "d72379344dacd3dbf9f810f92ddc87e6de1845b1"}

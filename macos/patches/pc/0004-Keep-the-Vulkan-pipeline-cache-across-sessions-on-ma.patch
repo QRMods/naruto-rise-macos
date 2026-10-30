@@ -1,0 +1,231 @@
+From e5cec57c596213683f24b39b29573fc05349e9c1 Mon Sep 17 00:00:00 2001
+From: alantero <36408154+alantero@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 01:40:53 +0100
+Subject: [PATCH 4/5] Keep the Vulkan pipeline cache across sessions on macOS
+
+On MoltenVK a new pipeline translates its SPIR-V to Metal Shading Language
+and compiles it, tens to hundreds of milliseconds. The graphics pipelines
+now share a VkPipelineCache, read from the cache folder
+(native-vulkan-pipelines.bin) when the first pipeline is created and
+written once none has been created for a few seconds and at shutdown. A
+pipeline seen in an earlier session is then created in a few milliseconds
+(Metal keeps its own compiled code by source).
+
+Elsewhere the drivers keep their own caches, and nothing changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/CMakeLists.txt                            |   2 +-
+ app/src/gpu/backend/vulkan/backend.cpp        |   1 +
+ app/src/gpu/backend/vulkan/graphics.h         |   4 +-
+ .../backend/vulkan/pipeline_disk_cache.cpp    | 121 ++++++++++++++++++
+ .../gpu/backend/vulkan/pipeline_disk_cache.h  |  22 ++++
+ 5 files changed, 148 insertions(+), 2 deletions(-)
+ create mode 100644 app/src/gpu/backend/vulkan/pipeline_disk_cache.cpp
+ create mode 100644 app/src/gpu/backend/vulkan/pipeline_disk_cache.h
+
+diff --git a/app/CMakeLists.txt b/app/CMakeLists.txt
+index bde1d02..aecb0d0 100644
+--- a/app/CMakeLists.txt
++++ b/app/CMakeLists.txt
+@@ -190,7 +190,7 @@ endif()
+ # The Vulkan backend of the engine, its completion service and the check of the
+ # SPIR-V contract.
+ set(NARUTORISE_NATIVE_VULKAN_SOURCES src/gpu/backend/vulkan/backend.cpp src/gpu/backend/vulkan/completion.cpp
+-    src/gpu/backend/vulkan/shader_contract.cpp)
++    src/gpu/backend/vulkan/shader_contract.cpp src/gpu/backend/vulkan/pipeline_disk_cache.cpp)
+ if(NARUTORISE_NATIVE_RENDERER_BOOTSTRAP AND NARUTORISE_NATIVE_VULKAN)
+     list(APPEND NARUTORISE_SOURCES ${NARUTORISE_NATIVE_VULKAN_SOURCES})
+ endif()
+diff --git a/app/src/gpu/backend/vulkan/backend.cpp b/app/src/gpu/backend/vulkan/backend.cpp
+index 5ecf0f7..8951ba4 100644
+--- a/app/src/gpu/backend/vulkan/backend.cpp
++++ b/app/src/gpu/backend/vulkan/backend.cpp
+@@ -1143,6 +1143,7 @@ bool Backend::Shutdown(std::string& evidence) {
+     return false;
+   }
+   state_->pipeline_set.Stop();  // The asynchronous pipeline threads end before anything is released.
++  ClosePipelineCache();
+   // Everything submitted must be seen complete before anything is released;
+   // unproved, ownership is kept for the diagnostic process termination.
+   std::string completion = "null";
+diff --git a/app/src/gpu/backend/vulkan/graphics.h b/app/src/gpu/backend/vulkan/graphics.h
+index b655e28..9d481be 100644
+--- a/app/src/gpu/backend/vulkan/graphics.h
++++ b/app/src/gpu/backend/vulkan/graphics.h
+@@ -2,6 +2,7 @@
+ // command batch until the completion service proves its last use.
+ #pragma once
+ #include "gpu/backend/vulkan/formats.h"
++#include "gpu/backend/vulkan/pipeline_disk_cache.h"
+ #include "gpu/backend/pipeline_set.h"
+ #include "gpu/shaders/package.h"
+ #include <bit>
+@@ -261,7 +262,8 @@ inline NativeResult MakeGraphicsPipeline(VkDevice device, VkPipelineLayout layou
+     info.pInputAssemblyState = &assembly; info.pViewportState = &viewport; info.pRasterizationState = &raster;
+     info.pMultisampleState = &ms; info.pDepthStencilState = &ds; info.pColorBlendState = &blend;
+     info.pDynamicState = &dynamic; info.layout = layout; info.renderPass = pipeline->pass;
+-    result = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline->pipeline);
++    result = vkCreateGraphicsPipelines(device, PersistentPipelineCache(device), 1, &info, nullptr, &pipeline->pipeline);
++    if (result == VK_SUCCESS) PipelineCreated();
+   }
+   for (auto module : modules) if (module) vkDestroyShaderModule(device, module, nullptr);
+   if (result != VK_SUCCESS) return NativeResult::Failed("native-vulkan-graphics-pipeline", result);
+diff --git a/app/src/gpu/backend/vulkan/pipeline_disk_cache.cpp b/app/src/gpu/backend/vulkan/pipeline_disk_cache.cpp
+new file mode 100644
+index 0000000..5a49760
+--- /dev/null
++++ b/app/src/gpu/backend/vulkan/pipeline_disk_cache.cpp
+@@ -0,0 +1,121 @@
++#include "gpu/backend/vulkan/pipeline_disk_cache.h"
++
++#if defined(__APPLE__)
++#include <atomic>
++#include <chrono>
++#include <filesystem>
++#include <fstream>
++#include <iterator>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <vector>
++#include <rex/logging.h>
++#include <rex/runtime.h>
++
++namespace gpu::vulkan {
++namespace {
++std::mutex cache_mutex;
++std::filesystem::path cache_path;
++VkDevice cache_device = VK_NULL_HANDLE;
++VkPipelineCache cache = VK_NULL_HANDLE;
++std::atomic<uint64_t> created{0};
++uint64_t saved_created = 0;
++std::once_flag saver_started;
++
++void SaveLocked() {
++  if (cache == VK_NULL_HANDLE || cache_path.empty() || saved_created == created.load()) return;
++  size_t size = 0;
++  if (vkGetPipelineCacheData(cache_device, cache, &size, nullptr) != VK_SUCCESS || !size) return;
++  std::vector<char> data(size);
++  if (vkGetPipelineCacheData(cache_device, cache, &size, data.data()) != VK_SUCCESS) return;
++  std::error_code ec;
++  std::filesystem::create_directories(cache_path.parent_path(), ec);
++  const auto temporary = cache_path.string() + ".tmp";
++  {
++    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
++    out.write(data.data(), std::streamsize(size));
++    if (!out) return;
++  }
++  std::filesystem::rename(temporary, cache_path, ec);
++  if (ec) return;
++  saved_created = created.load();
++  REXLOG_INFO("[native-vulkan] Pipeline cache saved: {} KB, {} pipelines this session", size / 1024, saved_created);
++}
++
++// Writes the cache once no pipeline has been created for a few seconds.
++void Saver() {
++  uint64_t seen = 0;
++  auto quiet_since = std::chrono::steady_clock::now();
++  for (;;) {
++    std::this_thread::sleep_for(std::chrono::seconds(2));
++    const uint64_t now = created.load();
++    if (now != seen) {
++      seen = now;
++      quiet_since = std::chrono::steady_clock::now();
++      continue;
++    }
++    if (std::chrono::steady_clock::now() - quiet_since < std::chrono::seconds(5)) continue;
++    std::lock_guard lock(cache_mutex);
++    SaveLocked();
++  }
++}
++}  // namespace
++
++VkPipelineCache PersistentPipelineCache(VkDevice device) {
++  std::lock_guard lock(cache_mutex);
++  if (cache != VK_NULL_HANDLE) return cache_device == device ? cache : VK_NULL_HANDLE;
++  // The cache folder is known once the game's paths are set: the pipelines
++  // before it (the setup screen's) are created without the cache.
++  if (cache_path.empty())
++    if (auto* runtime = rex::Runtime::instance(); runtime && !runtime->cache_root().empty())
++      cache_path = runtime->cache_root() / "native-vulkan-pipelines.bin";
++  if (cache_path.empty()) return VK_NULL_HANDLE;
++  std::vector<char> data;
++  {
++    std::ifstream in(cache_path, std::ios::binary);
++    data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
++  }
++  VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
++  info.initialDataSize = data.size();
++  info.pInitialData = data.empty() ? nullptr : data.data();
++  VkResult result = vkCreatePipelineCache(device, &info, nullptr, &cache);
++  if (result != VK_SUCCESS && !data.empty()) {
++    // A cache of another driver or version: start over.
++    info.initialDataSize = 0;
++    info.pInitialData = nullptr;
++    result = vkCreatePipelineCache(device, &info, nullptr, &cache);
++  }
++  if (result != VK_SUCCESS) {
++    cache = VK_NULL_HANDLE;
++    return VK_NULL_HANDLE;
++  }
++  cache_device = device;
++  REXLOG_INFO("[native-vulkan] Pipeline cache: {} ({} KB loaded)", cache_path.string(), data.size() / 1024);
++  std::call_once(saver_started, [] { std::thread(Saver).detach(); });
++  return cache;
++}
++
++void PipelineCreated() { created.fetch_add(1, std::memory_order_relaxed); }
++
++void SavePipelineCache() {
++  std::lock_guard lock(cache_mutex);
++  SaveLocked();
++}
++
++void ClosePipelineCache() {
++  std::lock_guard lock(cache_mutex);
++  SaveLocked();
++  if (cache != VK_NULL_HANDLE) vkDestroyPipelineCache(cache_device, cache, nullptr);
++  cache = VK_NULL_HANDLE;
++  cache_device = VK_NULL_HANDLE;
++}
++}  // namespace gpu::vulkan
++#else
++namespace gpu::vulkan {
++VkPipelineCache PersistentPipelineCache(VkDevice) { return VK_NULL_HANDLE; }
++void PipelineCreated() {}
++void SavePipelineCache() {}
++void ClosePipelineCache() {}
++}  // namespace gpu::vulkan
++#endif
+diff --git a/app/src/gpu/backend/vulkan/pipeline_disk_cache.h b/app/src/gpu/backend/vulkan/pipeline_disk_cache.h
+new file mode 100644
+index 0000000..49b30f4
+--- /dev/null
++++ b/app/src/gpu/backend/vulkan/pipeline_disk_cache.h
+@@ -0,0 +1,22 @@
++// The graphics pipelines' Vulkan pipeline cache, kept in the cache folder
++// across sessions on macOS. On MoltenVK a new pipeline translates its SPIR-V to
++// Metal Shading Language and compiles it, tens to hundreds of milliseconds;
++// the cache holds the translated shaders, so a pipeline seen in an earlier
++// session is created again in a few milliseconds (Metal keeps its own compiled
++// code by source). Elsewhere the drivers keep their own caches, and these
++// calls give VK_NULL_HANDLE and do nothing.
++#pragma once
++#include "gpu/backend/vulkan/formats.h"
++
++namespace gpu::vulkan {
++// The cache of `device`, read from the cache folder at the first call; for
++// another device than the first, none.
++VkPipelineCache PersistentPipelineCache(VkDevice device);
++// Counts a created pipeline: the cache is written once none has been created
++// for a few seconds.
++void PipelineCreated();
++// Writes the cache now, keeping it (the window's close, before a hard exit).
++void SavePipelineCache();
++// Writes the cache and destroys it, before its device goes.
++void ClosePipelineCache();
++}  // namespace gpu::vulkan
+-- 
+2.50.1 (Apple Git-155)
+

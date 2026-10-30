@@ -1,0 +1,156 @@
+From cb6325852bdb4533116e0091b11b9fd99c913eb6 Mon Sep 17 00:00:00 2001
+From: alantero <36408154+alantero@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 01:39:28 +0100
+Subject: [PATCH 3/5] Log the frame meter and slow frames on macOS
+
+For the macOS port's benchmark tools (tools/bench.py, tools/scenarios.py):
+the frame meter of REX_NATIVE_FPS_TITLE=1 also writes its half-second
+measurement to the log ([native-fps]), the title's presentation interval
+changes are logged ([native-pace]), and on macOS a frame that took over
+twice its period is logged with the profile slots and counters that name
+its cause ([native-hitch], off with REX_NATIVE_HITCH_LOG=0).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/gpu/d3d/frame.cpp         | 53 +++++++++++++++++++++++++++++++
+ app/src/gpu/diagnostics/profile.h | 23 +++++++++++---
+ 2 files changed, 71 insertions(+), 5 deletions(-)
+
+diff --git a/app/src/gpu/d3d/frame.cpp b/app/src/gpu/d3d/frame.cpp
+index 2bc5bc1..1b04c0a 100644
+--- a/app/src/gpu/d3d/frame.cpp
++++ b/app/src/gpu/d3d/frame.cpp
+@@ -49,6 +49,7 @@
+ #include "gpu/common/sha256.h"
+ #include <rex/ui/window.h>
+ #include <algorithm>
++#include <numeric>
+ #include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -171,6 +172,8 @@ void MeterSwap() {
+   m.sum = m.max = 0;
+   m.frames = 0;
+   m.window_start = now;
++  // The same half-second measurement in the log, read by tools/bench.py.
++  REXLOG_INFO("[native-fps] {:.1f} fps {:.1f} ms max {:.1f}", fps, mean_ms, max_ms);
+   auto* runtime = rex::Runtime::instance();
+   auto* app = runtime ? runtime->app_context() : nullptr;
+   if (!DisplayWindow() || !app) return;
+@@ -337,8 +340,51 @@ void TimeStepHook(PPCContext& ctx, uint8_t* base) {
+         p.multiple_steps, p.debt * 1e3, p.max_debt * 1e3, p.real_s, p.simulated_s, interpolation));
+   }
+ }
++#if defined(__APPLE__)
++int64_t hitch_last_exit = 0;  // Ticks at the end of the previous own Swap's limiter. Render thread only.
++// A frame whose own work (from the end of the previous own Swap's limiter to
++// this one) took over twice its period goes to the log as [native-hitch], with
++// the profile slots that took the most time (profile.h) and the pipeline and
++// texture counts of the frame, so a slow frame anywhere in the game names its
++// cause (tools/scenarios.py sums them). The slots and counters restart at every
++// own Swap. REX_NATIVE_HITCH_LOG=0 turns it off.
++void NoteFrameTime(int64_t entered, int64_t period, int64_t frequency) {
++  if (!profile::HitchLog() || MeasureSwaps() > 0) return;
++  std::array<uint64_t, profile::kCount> ns{};
++  for (unsigned i = 0; i < profile::kCount; ++i) {
++    ns[i] = profile::slots[i].ns.exchange(0, std::memory_order_relaxed);
++    profile::slots[i].calls.store(0, std::memory_order_relaxed);
++  }
++  std::array<uint64_t, profile::kCounterCount> c{};
++  for (unsigned i = 0; i < profile::kCounterCount; ++i)
++    c[i] = profile::counters[i].exchange(0, std::memory_order_relaxed);
++  const int64_t work = hitch_last_exit ? entered - hitch_last_exit : 0;
++  if (!period || work <= 2 * period) return;
++  std::array<unsigned, profile::kCount> order{};
++  std::iota(order.begin(), order.end(), 0u);
++  std::sort(order.begin(), order.end(), [&](unsigned a, unsigned b) { return ns[a] > ns[b]; });
++  std::string top;
++  for (unsigned k = 0, shown = 0; k < profile::kCount && shown < 5; ++k) {
++    const unsigned slot = order[k];
++    if (slot == profile::kSwapPace || ns[slot] < 1000000) continue;  // The limiter's own wait; under 1 ms.
++    top += fmt::format("{}{} {:.0f} ms", shown++ ? ", " : "", profile::kSlotNames[slot], ns[slot] / 1e6);
++  }
++  REXLOG_WARN("[native-hitch] {:.0f} ms (period {:.0f} ms): {} | pipelines created {} waited {} (max {} us) "
++              "async {} skipped draws {} | texture uploads {} ({} KB) buffer uploads {}",
++              work * 1000.0 / frequency, period * 1000.0 / frequency, top.empty() ? "nothing measured" : top,
++              c[profile::kPipelinesCreated], c[profile::kPipelinesWaited], c[profile::kPipelineWaitUsMax],
++              c[profile::kPipelinesAsync], c[profile::kPipelineSkippedDraws], c[profile::kTextureUploads],
++              c[profile::kUploadBytes] / 1024, c[profile::kBufferUploads]);
++}
++#endif
+ void PaceSwap(PPCContext& ctx, uint8_t* base, uint32_t dev) {
+   profile::Timer pace_time(profile::kSwapPace);
++#if defined(__APPLE__)
++  const int64_t entered = platform::Ticks();
++  struct ExitStamp {
++    ~ExitStamp() { hitch_last_exit = platform::Ticks(); }
++  } exit_stamp;
++#endif
+   auto& l = swap_limiter;
+   // A forced interval (ForcedSwapInterval: REX_NATIVE_SWAP_INTERVAL=<1..4>)
+   // paces the own Swap at that interval instead of the title's +13580, which
+@@ -354,10 +400,17 @@ void PaceSwap(PPCContext& ctx, uint8_t* base, uint32_t dev) {
+     interval = std::clamp(interval, 1u, 4u);
+   }
+   if (!l.frequency) l.frequency = platform::TickFrequency();
++  // The title's own rate changes (2 = 30 FPS, 1 = 60, 3 or 4 when it slows
++  // itself down), in the log for tools/scenarios.py and the frame meter.
++  if (interval != l.interval || rate != l.rate)
++    REXLOG_INFO("[native-pace] presentation interval {} -> {} (rate {})", l.interval, interval, rate);
+   if (interval != l.interval || rate != l.rate) l.next = 0;  // A new period starts a new phase.
+   l.interval = interval;
+   l.rate = rate;
+   const int64_t period = rate ? l.frequency / rate : int64_t(interval) * l.frequency / 60;
++#if defined(__APPLE__)
++  NoteFrameTime(entered, period, l.frequency);
++#endif
+   int64_t now = platform::Ticks();
+   ++l.paced;
+   if (l.next && now < l.next) {
+diff --git a/app/src/gpu/diagnostics/profile.h b/app/src/gpu/diagnostics/profile.h
+index 6406b35..d493f32 100644
+--- a/app/src/gpu/diagnostics/profile.h
++++ b/app/src/gpu/diagnostics/profile.h
+@@ -139,21 +139,34 @@ inline void Add(Slot slot, uint64_t ns) {
+   slots[slot].ns.fetch_add(ns, std::memory_order_relaxed);
+   slots[slot].calls.fetch_add(1, std::memory_order_relaxed);
+ }
+-// The profile runs with the diagnostic instruments (gpu::Diagnostics);
+-// off, a timer or a count costs one test.
++// The profile runs with the diagnostic instruments (gpu::Diagnostics), and
++// on macOS for the frame-time log of every slow frame (REX_NATIVE_HITCH_LOG,
++// on unless 0: d3d/frame.cpp); off, a timer or a count costs one test.
++inline bool HitchLog() {
++#if defined(__APPLE__)
++  static const bool value = [] {
++    const char* text = std::getenv("REX_NATIVE_HITCH_LOG");
++    return !(text && text[0] == '0');
++  }();
++  return value;
++#else
++  return false;
++#endif
++}
++inline bool Enabled() { return gpu::Diagnostics() || HitchLog(); }
+ inline void Count(Counter counter, uint64_t value) {
+-  if (gpu::Diagnostics()) counters[counter].fetch_add(value, std::memory_order_relaxed);
++  if (Enabled()) counters[counter].fetch_add(value, std::memory_order_relaxed);
+ }
+ // A counter that keeps the frame's largest value instead of the sum.
+ inline void Max(Counter counter, uint64_t value) {
+-  if (!gpu::Diagnostics()) return;
++  if (!Enabled()) return;
+   uint64_t seen = counters[counter].load(std::memory_order_relaxed);
+   while (seen < value && !counters[counter].compare_exchange_weak(seen, value, std::memory_order_relaxed)) {}
+ }
+ 
+ class Timer {
+  public:
+-  explicit Timer(Slot slot) : slot_(gpu::Diagnostics() ? slot : kCount), start_(slot_ == kCount ? 0 : Now()) {}
++  explicit Timer(Slot slot) : slot_(Enabled() ? slot : kCount), start_(slot_ == kCount ? 0 : Now()) {}
+   ~Timer() { Stop(); }
+   void Stop() {
+     if (slot_ == kCount) return;
+-- 
+2.50.1 (Apple Git-155)
+

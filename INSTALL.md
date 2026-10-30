@@ -22,7 +22,7 @@ version is [README.md](README.md).
 6. **Never delete `user/`**: it holds the saves. Never run `git clean -fdx`,
    `git reset --hard` or `rm -rf` on the project folder: they delete `game/` and `user/`.
 7. If an error is not in the [error table](#error-table), ask for the last 30 lines of
-   the output and for `user/logs/narutorise.log`. Don't guess fixes that change code.
+   the output and for the newest log in `user/logs/`. Don't guess fixes that change code.
 
 ## Facts
 
@@ -39,7 +39,7 @@ version is [README.md](README.md).
 | Build command | `./Build.command` (same as `python3 tools/build.py`). Options: `--iso PATH`, `--jobs N` (default 6). |
 | Build result | `dist/Naruto Rise of a Ninja.app`. The last output line is `Application: <path>`. |
 | Play command | `./Play.command`, or open the app. |
-| User data | `user/`: saves, `narutorise.toml` (settings), `cache/`, `logs/narutorise.log`. |
+| User data | `user/`: saves, `narutorise.toml` (settings), `cache/`, `logs/` (one log per session, `narutorise_NNN.log`), `incidents/` (why a session ended). |
 
 The build, in order: clones the source projects into `upstream/` at the commits in
 `sources.json`, applies the patches, extracts the `.iso` into `game/` (only if
@@ -222,8 +222,10 @@ Failure: a line `Build failed: ...`. Look it up in the [error table](#error-tabl
 ./Play.command
 ```
 
-The game window opens. The first time, some objects can appear a moment late while
-shaders compile; this goes away as the cache fills. Controls are in
+The game starts straight away, in the Mac's language when the game has it. Its menu
+(settings, controls, language) opens with F1, fn+F1 on a MacBook keyboard. The first
+time, some objects can appear a moment late while shaders compile; this goes away as the
+cache fills. Controls are in
 [README.md](README.md#controls-keyboard-and-mouse). Settings (language, renderer, frame
 rate, keys) are in `user/narutorise.toml`, described in
 [README.md](README.md#settings).
@@ -277,11 +279,11 @@ rm -rf upstream/naruto-rise-recomp build/applied-patches
 | An error mentioning files in `game/` after an interrupted first build | Half-extracted disc. | `rm -rf game`, then build again (the `.iso` must still be in place). |
 | `No space left on device` | Disk full. | Free space (step 5), then build again. |
 | `Killed`, or the Mac freezes during the build | Out of memory. | `./Build.command --jobs 2`. |
-| The game window opens and closes right away | Look at the log. | Ask for the end of `user/logs/narutorise.log`. |
+| The game window opens and closes right away | The start failed; the reason is in the session's report. | Ask for `stderr.log` of the newest folder in `user/incidents/`, and the newest log in `user/logs/`. |
 
 If nothing here matches, ask the person to open an issue at
 <https://github.com/QRMods/naruto-rise-macos/issues> with the end of the build output
-and `user/logs/narutorise.log`.
+and the newest log in `user/logs/`.
 
 ## Uninstalling
 

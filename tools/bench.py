@@ -27,9 +27,8 @@ def main():
     out = ROOT / 'user/logs' / f'{args.name}.csv'
     out.unlink(missing_ok=True)
     env = dict(os.environ, REX_NATIVE_INPUT_REPLAY=str(args.replay), REX_NATIVE_FPS_TITLE='1')
-    log = ROOT / 'user/logs/narutorise.log'
-    log_start = log.stat().st_size if log.exists() else 0
-    process = subprocess.Popen([BINARY, f'--perf_log_csv={out}', *args.cvars], env=env,
+    started = time.time()
+    process = subprocess.Popen([BINARY, f'--perf_log_csv={out}', '--show_startup_menu=false', *args.cvars], env=env,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         time.sleep(args.seconds)
@@ -41,7 +40,9 @@ def main():
             process.kill()
     if args.native:
         # Half-second measurements of the native renderer ([native-fps] in the log).
-        text = log.read_bytes()[log_start:].decode('utf-8', 'replace') if log.exists() else ''
+        # One log per session (narutorise_NNN.log): the one this run began.
+        logs = [log for log in (ROOT / 'user/logs').glob('narutorise*.log') if log.stat().st_mtime >= started]
+        text = max(logs, key=lambda log: log.stat().st_mtime).read_text('utf-8', 'replace') if logs else ''
         samples = [line.split('[native-fps] ', 1)[1].split() for line in text.splitlines() if '[native-fps] ' in line]
         tail = samples[-int(args.tail * 2):]
         if not tail:

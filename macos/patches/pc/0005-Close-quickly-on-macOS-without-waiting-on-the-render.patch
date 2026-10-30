@@ -1,0 +1,104 @@
+From b0bd236a9b9ddc0c6498b77c405f016bc74679f4 Mon Sep 17 00:00:00 2001
+From: alantero <36408154+alantero@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 03:13:53 +0100
+Subject: [PATCH 5/5] Close quickly on macOS without waiting on the render
+ thread
+
+On macOS the UI thread waits in CloseInOrder with the window frozen, while
+the render thread and the engine's owner may themselves wait for a drawable
+of the window's CAMetalLayer, which only the UI thread's run loop gives
+back. When that happened at Cmd+Q, the render thread never parked, the
+fallback ran after 10 s, and the release of the engine on the owner thread
+never returned: the process had to be forced to quit.
+
+On macOS the close now writes the session's pipeline cache first, waits
+at most 1 s for the render thread and 1 s for the guest threads, logs the
+result, and ends after the guest threads: OnClosing hard-exits the process
+right after either way. Other systems are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/gpu/d3d/close.cpp | 38 ++++++++++++++++++++++++++++++++------
+ 1 file changed, 32 insertions(+), 6 deletions(-)
+
+diff --git a/app/src/gpu/d3d/close.cpp b/app/src/gpu/d3d/close.cpp
+index cdb500a..9b0e46d 100644
+--- a/app/src/gpu/d3d/close.cpp
++++ b/app/src/gpu/d3d/close.cpp
+@@ -25,6 +25,9 @@
+ #include "gpu/diagnostics/census.h"
+ #include "gpu/shaders/pipelines.h"
+ #include "gpu/backend/dispatcher.h"
++#if defined(__APPLE__)
++#include "gpu/backend/vulkan/pipeline_disk_cache.h"
++#endif
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdio>
+@@ -115,11 +118,25 @@ bool CloseInOrder() {
+     stop_request_at = Clock::now();
+   }
+   stop_requested.store(true, std::memory_order_release);
+-  // 1. The render thread parks; after 10 s the fallback claims the stop. The
+-  // 10 s are counted by the clock of the records (a wait may return early by
+-  // less than the timer resolution).
++#if defined(__APPLE__)
++  // On macOS this UI thread waits below with the window frozen, while the
++  // render thread and the engine's owner may themselves wait for a drawable of
++  // the window's CAMetalLayer, which only this thread's run loop gives back. So
++  // the waits are short and the close ends after the guest threads (step 3):
++  // OnClosing hard-exits the process right after either way. The session's
++  // pipelines are written first, as the engine's shutdown is not reached.
++  vulkan::SavePipelineCache();
++  constexpr int64_t kParkMs = 1000, kFallbackParkTries = 50;
++  constexpr auto kJoinBudget = std::chrono::seconds(1);
++#else
++  constexpr int64_t kParkMs = 10000, kFallbackParkTries = 300;
++  constexpr auto kJoinBudget = std::chrono::seconds(3);
++#endif
++  // 1. The render thread parks; after kParkMs (10 s; 1 s on macOS) the fallback
++  // claims the stop. They are counted by the clock of the records (a wait may
++  // return early by less than the timer resolution).
+   bool parked = false;
+-  for (int64_t left = 10000; !parked && left > 0; left = 10000 - ms())
++  for (int64_t left = kParkMs; !parked && left > 0; left = kParkMs - ms())
+     parked = rex::thread::Wait(CloseParkedEvent(), false, std::chrono::milliseconds(left)) ==
+              rex::thread::WaitResult::kSuccess;
+   bool fallback = false;
+@@ -137,7 +154,8 @@ bool CloseInOrder() {
+   // In the fallback the render thread fails its fence wait on the closed
+   // source and parks behind the owner.
+   if (fallback)
+-    for (int i = 0; i < 300 && !host::ParkedStops(); ++i) rex::thread::Sleep(std::chrono::milliseconds(10));
++    for (int i = 0; i < kFallbackParkTries && !host::ParkedStops(); ++i)
++      rex::thread::Sleep(std::chrono::milliseconds(10));
+   host::Record("native-close-render", fmt::format(
+       "\"parked\":{},\"fallback\":{},\"parked_stops\":{},\"interrupts_joined\":{},\"interrupts\":{{{}}},\"after_ms\":{}",
+       parked, fallback, host::ParkedStops(), interrupts_joined, interrupts, ms()));
+@@ -164,7 +182,7 @@ bool CloseInOrder() {
+   if (kernel) kernel->TerminateTitle();
+   std::string joined_threads, straggler_threads;
+   uint32_t joined = 0, stragglers = 0;
+-  const auto deadline = Clock::now() + std::chrono::seconds(3);
++  const auto deadline = Clock::now() + kJoinBudget;
+   for (const auto& guest : guests) {
+     const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+     const bool done = rex::thread::Wait(guest.thread->thread(), false, std::chrono::milliseconds(std::max<int64_t>(left, 0))) ==
+@@ -177,6 +195,14 @@ bool CloseInOrder() {
+       "\"terminated\":{},\"guest_threads\":{},\"joined\":{},\"stragglers\":{},\"joined_threads\":[{}],"
+       "\"straggler_threads\":[{}],\"after_ms\":{}", kernel != nullptr, guests.size(), joined, stragglers, joined_threads,
+       straggler_threads, ms()));
++#if defined(__APPLE__)
++  // The release of the resources and of the engine runs on the owner thread,
++  // which may be waiting for a drawable (above): the process ends here.
++  if (!host::Journaled())
++    REXLOG_INFO("[narutorise] Close: render {}, {} of {} guest threads joined after {} ms; left: [{}]",
++                parked ? "parked" : "not parked", joined, guests.size(), ms(), straggler_threads);
++  return true;
++#endif
+   // 4. The registry resources, the device services and the device owner, only
+   // with every guest thread joined (a straggler could still reach them).
+   const std::string counts_before = EngineCounts(), registry_before = "{" + ResourceSummary() + "}";
+-- 
+2.50.1 (Apple Git-155)
+

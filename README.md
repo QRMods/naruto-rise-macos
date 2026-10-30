@@ -118,12 +118,17 @@ Keep the `naruto-rise-macos` folder where it is: the app finds the game and your
 through it (if you already moved it, see [step 9 of INSTALL.md](INSTALL.md#step-9-play)).
 Saves, settings, the cache and the logs are in its `user/` folder.
 
+The game starts straight away. Its menu (settings, controls, language) opens in the game
+with **F1** (**fn+F1** on a MacBook keyboard). The menus and the game use your Mac's
+language when the game has it. To get the PC port's setup screen at every start instead,
+set `show_startup_menu = true` in `user/narutorise.toml`.
+
 ## Controls (keyboard and mouse)
 
 | Controller | Keys |
 | --- | --- |
 | Left stick | W A S D |
-| Camera (right stick) | Mouse, or numeric keypad 8 4 2 6 |
+| Camera (right stick) | Mouse, or arrow keys |
 | A | Space |
 | B | E or Backspace |
 | X | J or left click |
@@ -133,21 +138,24 @@ Saves, settings, the cache and the logs are in its `user/` folder.
 | Left / right stick press | C / V or middle click |
 | Start | Return or Esc |
 | Back | Tab |
-| D-pad | Arrow keys, or 1 2 3 4 |
+| D-pad | 1 2 3 4, or numeric keypad 8 2 4 6 |
 
 A controller that works with SDL (Xbox, PlayStation and most others) works too. You can
-change the keys in `user/narutorise.toml` (the `keybind_*` lines).
+change the keys in the game's menu (F1), or in `user/narutorise.toml` (the `keybind_*` lines).
 
 ## Settings
 
 Settings are in `user/narutorise.toml`, created by the first build. Edit it with any text
 editor, such as TextEdit. Type straight quotes (`"`), not curly ones: in TextEdit, turn off
 **Edit ▸ Substitutions ▸ Smart Quotes**. Changes apply the next time you start the game.
+Most of them can also be changed in the game's menu (F1).
 
 | Setting | What it does |
 | --- | --- |
-| `user_language` | Game language: `1` English (default), `3` German, `4` French, `5` Spanish, `6` Italian. The languages available depend on your disc. |
-| `renderer` | `"native"` (default) or `"xenos"`, the emulated Xbox 360 GPU, which is slower. Try it if something looks wrong. |
+| `user_language` | Game language: `1` English, `3` German, `4` French, `5` Spanish, `6` Italian. The first build takes your Mac's language, or English if the game lacks it. The languages available depend on your disc. |
+| `launcher_language` | Language of the menus: `"en"`, `"es"`, `"fr"`, `"de"`, `"it"`, `"pt_BR"`, `"ru"`. The first build takes your Mac's. |
+| `show_startup_menu` | `false` (default on macOS) starts straight into the game; `true` opens the setup screen first. |
+| `show_shader_indicator` | `false` (default on macOS) hides the "Compiling shaders" notice shown while the game prepares new shaders; `true` shows it. |
 | `frame_rate` | `30` (default) keeps the open world at 30 FPS like the console. Fights always run at 60. From `60` to `240`, extra frames are interpolated, but on an M4 the village only reaches about 40. |
 | `msaa_samples` | Anti-aliasing: `0` is the game's own 4×; also `2`, `4` or `8`. |
 | `internal_resolution_scale` | `1.5` renders at 1920×1080; `0` uses `resolution_scale`. |
@@ -193,14 +201,18 @@ rm -rf upstream/naruto-rise-recomp build/applied-patches
 | The Mac gets very slow during the build | Build with fewer parallel jobs: `./Build.command --jobs 2`. |
 
 To report a problem, open an [issue](https://github.com/QRMods/naruto-rise-macos/issues)
-and attach `user/logs/narutorise.log`.
+and attach the newest log in `user/logs/`. If the game closed by itself, also attach the
+newest folder in `user/incidents/`: its `stderr.log` says why.
 
 ## Performance (MacBook with M4)
 
-| Scene | Native renderer | Xenos (emulation) |
-| --- | --- | --- |
-| Konoha (open world) | Steady 30 FPS | 12-15 FPS |
-| Fight | 59 FPS | 16-20 FPS |
+| Scene | Frame rate |
+| --- | --- |
+| Konoha (open world) | Steady 30 FPS |
+| Fight | 59 FPS |
+
+Measured with the previous version of the port (PC port v0.3.0-beta); not measured again
+on v0.4.0-beta yet.
 
 ### Checking for frame drops without playing
 
@@ -221,17 +233,29 @@ with `REX_NATIVE_INPUT_RECORD=file.nrinput`.
 
 This repository doesn't copy the projects it builds on. `tools/build.py` clones them
 into `upstream/` at the commits pinned in `sources.json`, applies the patches, extracts
-the game into `game/`, generates the recompiled code, translates the game's shaders
-(XenosRecomp, DXC, SPIR-V) and creates `dist/Naruto Rise of a Ninja.app`.
+the game into `game/`, generates the recompiled code and builds the PC port with its own
+CMake, as on Linux: the native renderer on Vulkan (MoltenVK), with the game's shaders
+translated at build time (XenosRecomp, DXC, SPIR-V). Then it creates
+`dist/Naruto Rise of a Ninja.app`. The PC port's codegen manifest names the character
+DLC modules; the build leaves out the ones your disc lacks. Sentry crash reporting, which
+reports to the PC port's own project, is off.
 
-The macOS-specific code is in `macos/`:
+The macOS-specific parts are in `macos/`:
 
-- `main.cpp`, `platform.cpp`: the app's entry point and the lookup of the bundled Vulkan loader.
-- `native/`: the native renderer's Win32 layer on POSIX, Mach and SDL3, the on-disk
-  pipeline cache, and the guarded copy of the game's memory.
-- `naruto-native-macos.patch`: the Metal surface, memory reads, pipeline skipping on
-  Vulkan, and FPS and slow-frame (`[native-hitch]`) lines in the log.
-- `rexglue-*.patch`: SDK changes (SDL window, Vulkan presenter, module loading).
+- `patches/pc/`: the changes to the PC port, one commit each (`git format-patch`),
+  written so they can go upstream:
+  1. Building and running on macOS: the platform layer (Mach, dyld, QoS classes), the
+     Metal surface, the bundled Vulkan loader and the app bundle's resources.
+  2. Skipping draws while MoltenVK creates their pipelines (below).
+  3. The frame-rate and slow-frame (`[native-hitch]`) lines in the log, for `tools/`.
+  4. The pipeline cache kept across sessions (below).
+  5. A quick close on Cmd+Q (below).
+- `patches/sdk/`: SDK patches applied after the PC port's: the PS5 port's (16 KB page
+  write watches, Vulkan submission and frame pacing), adapted to follow them, guest
+  module loading, the Vulkan presenter, and `std::atomic<std::shared_ptr>` where libc++
+  lacks it.
+- `narutorise.toml`: the macOS defaults over the PC port's (keyboard and mouse, a
+  window, 30 FPS, straight into the game, no shader notice).
 
 ### New shaders without stutter
 
@@ -247,27 +271,28 @@ which costs tens to hundreds of milliseconds on a Mac. On macOS:
 - Compiled pipelines are saved in `user/cache/native-vulkan-pipelines.bin` and reused in
   later sessions.
 
-### Reading the game's memory
+### Quitting
 
-For each draw, the renderer reads vertices, indices, constants and fences from the
-game's memory, thousands of times per frame. On PC each read is a `memcpy` under
-`__try`. On macOS it used to be a kernel call (`mach_vm_read_overwrite`), about 60 times
-slower, so the cost grew with how much each scene drew. Now it's a `memcpy` with a signal
-handler installed ahead of the SDK's (`macos/native/guest_fault_guard.cpp`): an address
-with no memory makes the copy fail, as on PC, and the SDK's write watching still gets
-its faults.
+On Cmd+Q the window waits while the renderer closes in order. On macOS the renderer may
+itself be waiting for an image of the window, which only the waiting main thread gives
+back, so the PC port's close could hang. On macOS the close writes the pipeline cache,
+waits at most a second for the renderer and the game's threads, and ends the process.
 
 ### Updating the source projects
 
 To move a source project to a new version, change its commit in `sources.json` and build
 again. The PC port and the SDK carry the patches applied, so first delete
 `upstream/naruto-rise-recomp` and `build/applied-patches/`. If only the patches change,
-building is enough: the applied ones are reverted and the new ones applied. If a patch no
-longer applies, fix it on the code in `upstream/` and regenerate the file with `git diff`.
+building is enough: the applied ones are reverted and the new ones applied. If a patch
+of `macos/patches/pc` no longer applies, apply the series with `git am -3` on a branch at
+the new commit, resolve the conflicts and export it again with `git format-patch`.
 
 ### Known issues
 
-- The interpolated 60 FPS mode doesn't hold in the village on an M4 (about 40).
+- The interpolated 60 FPS mode doesn't hold in the village on an M4 (about 40), measured
+  with the previous version.
+- There is no Xenos renderer on macOS since PC port v0.4.0-beta, which builds it on
+  Windows only: the native renderer is the only one.
 
 ## Credits
 
