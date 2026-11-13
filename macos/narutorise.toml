@@ -3,8 +3,10 @@
 
 # Keyboard and mouse: a Mac rarely has a gamepad connected.
 mnk_mode = true
-# A window rather than the whole screen.
-fullscreen = false
+# The whole screen, in its own Space: macOS applies Game Mode to a game there (the
+# CPU and GPU first, half the controller's Bluetooth latency). Option+Return, F11
+# (fn+F11) or the game menu (F1) switch to a window.
+fullscreen = true
 # 30 FPS, the game's own rate: 60 with interpolation does not hold in Konoha on an M4.
 frame_rate = 30
 # Straight into the game, as before PC port v0.4.0: its settings menu opens in the

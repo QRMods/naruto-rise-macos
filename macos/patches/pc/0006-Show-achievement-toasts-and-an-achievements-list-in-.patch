@@ -1,0 +1,2277 @@
+From 4e2f20cc83b3e4b0ee5e58d640db7dc04a8844b8 Mon Sep 17 00:00:00 2001
+From: alantero <36408154+alantero@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 05:43:18 +0100
+Subject: [PATCH 6/7] Show achievement toasts and an achievements list in the
+ native menus
+
+The SDK keeps the achievements (XGIUserWriteAchievements, the
+AchievementManager and user/achievements/<title>.toml), but its toast is
+an ImGui dialog of the presenter, which the native renderer does not
+have: an unlock was saved and never shown. The menus' RmlUi now shows
+them, in both renderers (CreateAchievementNotificationDialog returns
+nothing, so Xenos does not show the SDK's as well).
+
+- A toast for each new unlock, after the Xbox 360 one: a medal pops in at
+  the bottom center, opens into a pill with "Achievement unlocked", the
+  gamerscore and the name and the achievement's icon, closes and spins
+  away. Lights run around the medal's ring, the ring blinks green, and an
+  orb and a green trophy take turns in it about once a second. The
+  achievement's sound plays with it. Toasts queue and wait while the list
+  shows.
+- The list (Achievements in the game menu, or the controller's Guide
+  button, also during a toast, focused on that achievement): progress and
+  gamerscore, every achievement with its icon, description and unlock
+  date, filters (all, unlocked, locked), four sorts, and secret
+  achievements hidden until unlocked.
+- Names, descriptions and icons are the title's (its XDBF), in the game's
+  language, and so are the words around them (TextIn), whatever the
+  menus' language.
+- Every image is made on the CPU at the pixel size it shows at
+  (achievement_art): the 64x64 icons resampled with Catmull-Rom and
+  rounded, their locked versions, and procedural lights, glow, shine,
+  trophy and padlock, since the render interface has no shaders. The orb
+  and the sound are optional local files (achievements/orb.png and
+  unlock.wav beside the executable or in Resources); without them the
+  orb is a neutral sphere and the toast is silent.
+- The Guide button reaches the menus even with guide_button off
+  (Device::guide); the guest still sees it only with guide_button.
+- On macOS GameController hands the Home button to the app in front only
+  while the app claims it, and SDL gives the claim back each time a
+  controller closes: while the game runs it claims it again on every
+  controller (menu/home_button_mac.mm). macOS 26 acts on the press as
+  well, and no app can stop it: for a game Apple has not listed for its
+  Game Overlay, gamepolicyd opens the Games app when the button is
+  released. So for a few seconds after a press the game took, the Games
+  app the system opens is closed again (hidden when it was open already)
+  and the game stays in front.
+- NARUTORISE_ACHIEVEMENT_PREVIEW shows toasts, the list or the menu, or
+  acts as a Home button press, for checking the presentation; "unlock"
+  unlocks one through the SDK.
+---
+ app/CMakeLists.txt                 |   7 +
+ app/src/controls/service.cpp       |   1 +
+ app/src/controls/service.h         |   3 +
+ app/src/menu/achievement_art.cpp   | 406 +++++++++++++++++++++++
+ app/src/menu/achievement_art.h     |  47 +++
+ app/src/menu/achievement_sound.cpp |  57 ++++
+ app/src/menu/achievement_sound.h   |  29 ++
+ app/src/menu/achievements.cpp      | 503 +++++++++++++++++++++++++++++
+ app/src/menu/achievements.h        | 103 ++++++
+ app/src/menu/assets.cpp            |  16 +
+ app/src/menu/home_button.h         |  22 ++
+ app/src/menu/home_button_mac.mm    | 128 ++++++++
+ app/src/menu/pad_input.cpp         |  10 +-
+ app/src/menu/pad_input.h           |   5 +
+ app/src/menu/render_interface.cpp  |   6 +
+ app/src/menu/text.cpp              |  27 +-
+ app/src/menu/text.h                |   3 +
+ app/src/menu/ui.cpp                |  55 +++-
+ app/src/menu/ui.h                  |  26 +-
+ app/src/narutorise_app.h           | 183 ++++++++++-
+ app/ui/achievement_toast.rcss      |  23 ++
+ app/ui/achievement_toast.rml       |   2 +
+ app/ui/achievements.rcss           |  78 +++++
+ app/ui/achievements.rml            |   2 +
+ app/ui/overlay.rcss                |   2 +-
+ app/ui/overlay.rml                 |   2 +-
+ 26 files changed, 1730 insertions(+), 16 deletions(-)
+ create mode 100644 app/src/menu/achievement_art.cpp
+ create mode 100644 app/src/menu/achievement_art.h
+ create mode 100644 app/src/menu/achievement_sound.cpp
+ create mode 100644 app/src/menu/achievement_sound.h
+ create mode 100644 app/src/menu/achievements.cpp
+ create mode 100644 app/src/menu/achievements.h
+ create mode 100644 app/src/menu/home_button.h
+ create mode 100644 app/src/menu/home_button_mac.mm
+ create mode 100644 app/ui/achievement_toast.rcss
+ create mode 100644 app/ui/achievement_toast.rml
+ create mode 100644 app/ui/achievements.rcss
+ create mode 100644 app/ui/achievements.rml
+
+diff --git a/app/CMakeLists.txt b/app/CMakeLists.txt
+index aecb0d0..8a9cfa4 100644
+--- a/app/CMakeLists.txt
++++ b/app/CMakeLists.txt
+@@ -207,6 +207,7 @@ else()
+ endif()
+ target_link_libraries(narutorise PRIVATE narutorise::json RmlUi::Core narutorise_data_migration)
+ add_library(narutorise_menu_components STATIC src/menu/text.cpp src/menu/panel.cpp src/menu/pad_input.cpp
++            src/menu/achievements.cpp src/menu/achievement_art.cpp src/menu/achievement_sound.cpp
+             src/controls/config.cpp
+             src/controls/service.cpp
+             src/controls/runtime.cpp
+@@ -220,6 +221,12 @@ add_library(narutorise_menu_components STATIC src/menu/text.cpp src/menu/panel.c
+ target_sources(narutorise_menu_components PRIVATE src/menu/content_manager.cpp src/menu/folders.cpp)
+ target_sources(narutorise_menu_components PRIVATE src/menu/update_checker.cpp)
+ target_sources(narutorise_menu_components PRIVATE src/menu/game_logo.cpp)
++if(APPLE)
++    # The controllers' Home button, claimed from the system while the game runs (menu/home_button.h).
++    enable_language(OBJCXX)
++    target_sources(narutorise_menu_components PRIVATE src/menu/home_button_mac.mm)
++    target_link_libraries(narutorise_menu_components PUBLIC "-framework GameController" "-framework AppKit" "-framework Foundation")
++endif()
+ target_include_directories(narutorise_menu_components PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../sdk/thirdparty/stb)
+ target_include_directories(narutorise_menu_components PUBLIC src)
+ target_link_libraries(narutorise_menu_components PUBLIC rex::runtime RmlUi::Core narutorise::json narutorise_data_paths narutorise_incidents)
+diff --git a/app/src/controls/service.cpp b/app/src/controls/service.cpp
+index ace62f5..159a765 100644
+--- a/app/src/controls/service.cpp
++++ b/app/src/controls/service.cpp
+@@ -184,6 +184,7 @@ void Service::Poll(const std::string& backend, bool focused) {
+         for (int i = 0; i < 15; ++i)
+           if (SDL_GetGamepadButton(pad, buttons[i]))
+             d.raw.buttons |= bits[i];
++        d.guide = (d.raw.buttons & 0x400) != 0;
+         if (rex::cvar::GetFlagByName("guide_button") != "true")
+           d.raw.buttons &= ~uint16_t(0x400);
+         for (int i = 0; i < 6; ++i) {
+diff --git a/app/src/controls/service.h b/app/src/controls/service.h
+index 8d926c6..cf4e8fe 100644
+--- a/app/src/controls/service.h
++++ b/app/src/controls/service.h
+@@ -17,6 +17,9 @@ struct Device {
+   std::string key, name;
+   uint64_t generation = 0;
+   bool keyboard = false, rumble = false, transient = false;
++  // The Guide button for the menus (the achievements), held even when the
++  // guest's 0x400 is cleared because guide_button is off.
++  bool guide = false;
+   std::array<bool, 6> axes{};
+   RawState raw;
+   SDL_Gamepad* pad = nullptr;  // UI thread only, never dereference from guest
+diff --git a/app/src/menu/achievement_art.cpp b/app/src/menu/achievement_art.cpp
+new file mode 100644
+index 0000000..bfbe70d
+--- /dev/null
++++ b/app/src/menu/achievement_art.cpp
+@@ -0,0 +1,406 @@
++// The images of the achievements (achievement_art.h).
++#include "menu/achievement_art.h"
++
++#include <algorithm>
++#include <charconv>
++#include <cmath>
++#include <fstream>
++#include <string>
++#include <rex/logging.h>
++#include <rex/ui/image_decode.h>
++
++namespace narutorise::menu::achievement_art {
++namespace {
++
++std::function<std::vector<uint8_t>(uint32_t)> icon_source;
++std::filesystem::path orb_file;
++
++constexpr float kPi = 3.14159265358979f;
++// The accents of the toast and the list: the green of the light, and the white of its core.
++constexpr float kGreen[3] = {141, 198, 63};
++constexpr float kCore[3] = {236, 255, 214};
++
++float Clamp01(float v) { return std::clamp(v, 0.0f, 1.0f); }
++float SmoothStep(float edge0, float edge1, float x) {
++  const float t = Clamp01((x - edge0) / (edge1 - edge0));
++  return t * t * (3 - 2 * t);
++}
++// Coverage of a pixel by a shape from its signed distance in pixels.
++float Coverage(float distance_px) { return Clamp01(0.5f - distance_px); }
++
++Image Blank(uint32_t width, uint32_t height) {
++  Image image;
++  image.width = width;
++  image.height = height;
++  image.rgba.assign(size_t(width) * height * 4, 0);
++  return image;
++}
++
++// Straight-alpha "over" of a color with coverage a onto one pixel.
++void Blend(uint8_t* p, const float rgb[3], float a) {
++  a = Clamp01(a);
++  if (a <= 0) return;
++  const float da = p[3] / 255.0f;
++  const float oa = a + da * (1 - a);
++  for (int c = 0; c < 3; ++c) {
++    const float value = (rgb[c] * a + p[c] * da * (1 - a)) / oa;
++    p[c] = uint8_t(std::clamp(value, 0.0f, 255.0f) + 0.5f);
++  }
++  p[3] = uint8_t(oa * 255 + 0.5f);
++}
++
++void Over(Image& destination, const Image& source, int left, int top) {
++  for (uint32_t y = 0; y < source.height; ++y) {
++    const int dy = top + int(y);
++    if (dy < 0 || dy >= int(destination.height)) continue;
++    for (uint32_t x = 0; x < source.width; ++x) {
++      const int dx = left + int(x);
++      if (dx < 0 || dx >= int(destination.width)) continue;
++      const uint8_t* s = &source.rgba[(size_t(y) * source.width + x) * 4];
++      const float rgb[3] = {float(s[0]), float(s[1]), float(s[2])};
++      Blend(&destination.rgba[(size_t(dy) * destination.width + dx) * 4], rgb, s[3] / 255.0f);
++    }
++  }
++}
++
++// Signed distance (in units of the shape) to a rounded rectangle centered at
++// (cx, cy) with half sizes (hx, hy) and corner radius r.
++float RoundedBox(float x, float y, float cx, float cy, float hx, float hy, float r) {
++  const float qx = std::fabs(x - cx) - (hx - r), qy = std::fabs(y - cy) - (hy - r);
++  return std::hypot(std::max(qx, 0.0f), std::max(qy, 0.0f)) + std::min(std::max(qx, qy), 0.0f) - r;
++}
++
++void MaskRounded(Image& image, float radius) {
++  const float w = float(image.width), h = float(image.height);
++  for (uint32_t y = 0; y < image.height; ++y)
++    for (uint32_t x = 0; x < image.width; ++x) {
++      uint8_t* p = &image.rgba[(size_t(y) * image.width + x) * 4];
++      const float cover = Coverage(RoundedBox(x + 0.5f, y + 0.5f, w / 2, h / 2, w / 2, h / 2, radius));
++      p[3] = uint8_t(p[3] * cover + 0.5f);
++    }
++}
++
++void MaskCircle(Image& image) { MaskRounded(image, image.width / 2.0f); }
++
++float CatmullRom(float x) {
++  x = std::fabs(x);
++  if (x < 1) return 1.5f * x * x * x - 2.5f * x * x + 1;
++  if (x < 2) return -0.5f * x * x * x + 2.5f * x * x - 4 * x + 2;
++  return 0;
++}
++
++struct Tap {
++  uint32_t index;
++  float weight;
++};
++
++// The source pixels of each output pixel along one axis, widened when
++// shrinking so every source pixel counts (no aliasing on the orb).
++std::vector<std::vector<Tap>> Taps(uint32_t in, uint32_t out) {
++  std::vector<std::vector<Tap>> taps(out);
++  const float scale = float(in) / float(out);
++  const float stretch = std::max(1.0f, scale);
++  const float support = 2 * stretch;
++  for (uint32_t o = 0; o < out; ++o) {
++    const float center = (o + 0.5f) * scale - 0.5f;
++    const int first = int(std::floor(center - support)), last = int(std::ceil(center + support));
++    float sum = 0;
++    for (int i = first; i <= last; ++i) {
++      const float weight = CatmullRom((i - center) / stretch);
++      if (weight == 0) continue;
++      taps[o].push_back({uint32_t(std::clamp(i, 0, int(in) - 1)), weight});
++      sum += weight;
++    }
++    if (sum != 0)
++      for (Tap& tap : taps[o]) tap.weight /= sum;
++  }
++  return taps;
++}
++
++Image Fit(Image image, uint32_t px) {
++  if (image.width == px && image.height == px) return image;
++  return Resample(image, px, px);
++}
++
++// A neutral silver sphere with a green rim, for when there is no orb file.
++Image ProceduralOrb(uint32_t px) {
++  Image image = Blank(px, px);
++  const float radius = px / 2.0f;
++  const float light[3] = {-0.42f, -0.62f, 0.66f};
++  for (uint32_t y = 0; y < px; ++y)
++    for (uint32_t x = 0; x < px; ++x) {
++      const float nx = (x + 0.5f - radius) / radius, ny = (y + 0.5f - radius) / radius;
++      const float d = std::hypot(nx, ny);
++      const float cover = Coverage((d - 1) * radius);
++      if (cover <= 0) continue;
++      const float nz = std::sqrt(std::max(0.0f, 1 - d * d));
++      const float lambert = std::max(0.0f, nx * light[0] + ny * light[1] + nz * light[2]);
++      const float spec = std::pow(lambert, 28.0f);
++      const float base = 46 + 170 * std::pow(lambert, 0.85f);
++      const float rim = SmoothStep(0.72f, 1.0f, d) * 0.75f;
++      float rgb[3];
++      for (int c = 0; c < 3; ++c) rgb[c] = std::min(255.0f, base * (1 - rim) + kGreen[c] * rim + 255 * spec * 0.8f);
++      Blend(&image.rgba[(size_t(y) * px + x) * 4], rgb, cover);
++    }
++  return image;
++}
++
++Image Orb(uint32_t px) {
++  if (!orb_file.empty()) {
++    std::ifstream file(orb_file, std::ios::binary);
++    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
++    Image image = Decode(bytes);
++    if (!image.rgba.empty()) {
++      image = Fit(std::move(image), px);
++      MaskCircle(image);
++      return image;
++    }
++    REXLOG_WARN("[narutorise] Achievements: the orb {} did not decode; using the built-in one",
++                orb_file.string());
++    orb_file.clear();
++  }
++  return ProceduralOrb(px);
++}
++
++Image Icon(uint32_t image_id, uint32_t px, bool locked) {
++  Image source = icon_source ? Decode(icon_source(image_id)) : Image{};
++  Image image;
++  if (source.rgba.empty()) {
++    // No picture in the title: the orb on a dark tile.
++    image = Blank(px, px);
++    const float tile[3] = {30, 30, 30};
++    for (size_t i = 0; i < image.rgba.size(); i += 4) Blend(&image.rgba[i], tile, 1);
++    const uint32_t orb = std::max<uint32_t>(1, uint32_t(px * 0.62f));
++    Over(image, Orb(orb), int(px - orb) / 2, int(px - orb) / 2);
++  } else {
++    image = Fit(std::move(source), px);
++  }
++  if (locked) {
++    for (size_t i = 0; i < image.rgba.size(); i += 4) {
++      uint8_t* p = &image.rgba[i];
++      const float gray = 0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2];
++      // Nearly gray, darker, with a cold tint: clearly not earned yet.
++      const float tint[3] = {0.92f, 0.96f, 1.04f};
++      for (int c = 0; c < 3; ++c) {
++        const float value = (gray * 0.9f + p[c] * 0.1f) * 0.46f * tint[c] + 10;
++        p[c] = uint8_t(std::clamp(value, 0.0f, 255.0f));
++      }
++    }
++  }
++  MaskRounded(image, px * 0.14f);
++  return image;
++}
++
++// Two comets of light running around the ring between the orb and its frame,
++// over a faint glow of the whole ring. Rotating it moves the lights.
++Image Lights(uint32_t px) {
++  Image image = Blank(px, px);
++  const float radius = px / 2.0f;
++  for (uint32_t y = 0; y < px; ++y)
++    for (uint32_t x = 0; x < px; ++x) {
++      const float nx = (x + 0.5f - radius) / radius, ny = (y + 0.5f - radius) / radius;
++      const float d = std::hypot(nx, ny);
++      const float band = std::exp(-std::pow((d - 0.815f) / 0.05f, 2.0f));
++      if (band < 0.002f) continue;
++      const float theta = std::atan2(ny, nx);  // Clockwise on screen.
++      float tail = 0, head = 0;
++      for (const float lead : {0.0f, kPi}) {
++        float delta = std::fmod(lead - theta + 4 * kPi, 2 * kPi);  // Behind the head.
++        tail = std::max(tail, std::exp(-delta / 0.55f));
++        head = std::max(head, std::exp(-std::pow(delta / 0.11f, 2.0f)));
++      }
++      float rgb[3];
++      for (int c = 0; c < 3; ++c) rgb[c] = kGreen[c] + (kCore[c] - kGreen[c]) * head;
++      Blend(&image.rgba[(size_t(y) * px + x) * 4], rgb, band * Clamp01(0.14f + 0.95f * tail + 0.4f * head));
++    }
++  return image;
++}
++
++Image Glow(uint32_t px) {
++  Image image = Blank(px, px);
++  const float radius = px / 2.0f;
++  for (uint32_t y = 0; y < px; ++y)
++    for (uint32_t x = 0; x < px; ++x) {
++      const float d = std::hypot(x + 0.5f - radius, y + 0.5f - radius) / radius;
++      const float a = 0.6f * std::exp(-std::pow(d / 0.46f, 2.0f)) * (1 - SmoothStep(0.8f, 1.0f, d));
++      const float core = std::exp(-std::pow(d / 0.22f, 2.0f));
++      float rgb[3];
++      for (int c = 0; c < 3; ++c) rgb[c] = kGreen[c] + (kCore[c] - kGreen[c]) * core;
++      Blend(&image.rgba[(size_t(y) * px + x) * 4], rgb, a);
++    }
++  return image;
++}
++
++Image Shine(uint32_t width, uint32_t height) {
++  Image image = Blank(width, height);
++  const float white[3] = {255, 255, 255};
++  for (uint32_t y = 0; y < height; ++y)
++    for (uint32_t x = 0; x < width; ++x) {
++      const float u = (x + 0.5f) / width, v = (y + 0.5f) / height;
++      const float slant = u + (v - 0.5f) * 0.32f;
++      const float band = std::exp(-std::pow((slant - 0.5f) / 0.15f, 2.0f));
++      const float fade = SmoothStep(0.0f, 0.2f, v) * (1 - SmoothStep(0.8f, 1.0f, v));
++      Blend(&image.rgba[(size_t(y) * width + x) * 4], white, 0.38f * band * fade);
++    }
++  return image;
++}
++
++// A trophy in the green of the lights on a black disc: the cup with its two
++// handles, the stem and a two-step base, lighter at the top like lit metal.
++Image Trophy(uint32_t px) {
++  Image image = Blank(px, px);
++  const float s = float(px);
++  const float disc[3] = {6, 6, 6};
++  for (uint32_t y = 0; y < px; ++y)
++    for (uint32_t x = 0; x < px; ++x) {
++      float u = (x + 0.5f) / s, v = (y + 0.5f) / s;
++      uint8_t* p = &image.rgba[(size_t(y) * px + x) * 4];
++      Blend(p, disc, Coverage((std::hypot(u - 0.5f, v - 0.5f) - 0.5f) * s));
++      // The trophy's own coordinates: 15% larger than the unit square, so it fills the disc.
++      constexpr float kGrow = 1.15f;
++      const float shape_scale = s * kGrow;
++      u = 0.5f + (u - 0.5f) / kGrow;
++      v = 0.5f + (v - 0.5f) / kGrow;
++      // The cup: a flat rim over a half ellipse.
++      const float bowl = v < 0.36f ? RoundedBox(u, v, 0.5f, 0.29f, 0.2f, 0.07f, 0.01f)
++                                   : std::hypot((u - 0.5f) / 0.2f, (v - 0.36f) / 0.2f) * 0.2f - 0.2f;
++      const float rim = RoundedBox(u, v, 0.5f, 0.235f, 0.225f, 0.022f, 0.012f);
++      // The handles: the outer halves of two rings beside the cup.
++      const float left = u < 0.31f ? std::fabs(std::hypot(u - 0.31f, v - 0.335f) - 0.085f) - 0.024f : 1.0f;
++      const float right = u > 0.69f ? std::fabs(std::hypot(u - 0.69f, v - 0.335f) - 0.085f) - 0.024f : 1.0f;
++      const float stem = RoundedBox(u, v, 0.5f, 0.615f, 0.032f + 0.03f * std::max(0.0f, v - 0.62f) / 0.06f, 0.07f, 0.008f);
++      const float neck = RoundedBox(u, v, 0.5f, 0.6f, 0.06f, 0.018f, 0.01f);
++      const float base = std::min(RoundedBox(u, v, 0.5f, 0.705f, 0.12f, 0.025f, 0.012f),
++                                  RoundedBox(u, v, 0.5f, 0.765f, 0.17f, 0.03f, 0.014f));
++      const float shape = std::min({bowl, rim, left, right, stem, neck, base});
++      const float cover = Coverage(shape * shape_scale);
++      if (cover <= 0) continue;
++      // Lit from the top left: brighter there, a soft highlight on the bowl.
++      const float light = 1.12f - 0.42f * Clamp01((v - 0.2f) / 0.6f);
++      const float shine = std::exp(-std::pow((u - 0.42f) / 0.045f, 2.0f)) * SmoothStep(0.23f, 0.3f, v) *
++                          (1 - SmoothStep(0.4f, 0.5f, v));
++      float rgb[3];
++      for (int c = 0; c < 3; ++c) rgb[c] = std::min(255.0f, kGreen[c] * light + (kCore[c] - kGreen[c]) * 0.55f * shine);
++      Blend(p, rgb, cover);
++    }
++  return image;
++}
++
++// A padlock on a dark disc with a green rim.
++Image Lock(uint32_t px) {
++  Image image = Blank(px, px);
++  const float disc[3] = {18, 18, 18}, rim[3] = {kGreen[0], kGreen[1], kGreen[2]};
++  const float metal[3] = {232, 232, 232}, hole[3] = {24, 24, 24};
++  const float s = float(px);
++  for (uint32_t y = 0; y < px; ++y)
++    for (uint32_t x = 0; x < px; ++x) {
++      const float u = (x + 0.5f) / s, v = (y + 0.5f) / s;
++      uint8_t* p = &image.rgba[(size_t(y) * px + x) * 4];
++      const float d = std::hypot(u - 0.5f, v - 0.5f);
++      Blend(p, disc, 0.94f * Coverage((d - 0.5f) * s));
++      Blend(p, rim, Coverage((std::fabs(d - 0.47f) - 0.022f) * s));
++      // The shackle: the top half of a ring and its two legs into the body.
++      float shackle;
++      if (v < 0.46f) shackle = std::fabs(std::hypot(u - 0.5f, v - 0.46f) - 0.12f) - 0.03f;
++      else shackle = std::min(std::fabs(u - 0.38f), std::fabs(u - 0.62f)) - 0.03f + std::max(0.0f, v - 0.56f);
++      Blend(p, metal, Coverage(shackle * s));
++      Blend(p, metal, Coverage(RoundedBox(u, v, 0.5f, 0.635f, 0.2f, 0.155f, 0.045f) * s));
++      const float keyhole = std::min(std::hypot(u - 0.5f, v - 0.61f) - 0.036f,
++                                     RoundedBox(u, v, 0.5f, 0.67f, 0.014f, 0.05f, 0.01f));
++      Blend(p, hole, Coverage(keyhole * s));
++    }
++  return image;
++}
++
++bool Number(std::string_view text, uint32_t& value) {
++  const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
++  return result.ec == std::errc() && result.ptr == text.data() + text.size();
++}
++
++}  // namespace
++
++void SetIconSource(std::function<std::vector<uint8_t>(uint32_t)> source) { icon_source = std::move(source); }
++void SetOrbFile(std::filesystem::path path) { orb_file = std::move(path); }
++
++Image Decode(std::span<const uint8_t> bytes) {
++  Image image;
++  if (bytes.empty()) return image;
++  int width = 0, height = 0;
++  image.rgba = rex::ui::DecodeImageRGBA(bytes.data(), bytes.size(), width, height);
++  if (image.rgba.empty() || width <= 0 || height <= 0) return {};
++  image.width = uint32_t(width);
++  image.height = uint32_t(height);
++  return image;
++}
++
++Image Resample(const Image& source, uint32_t width, uint32_t height) {
++  if (source.rgba.empty() || !width || !height) return {};
++  // Premultiplied, so transparent texels do not bleed their color into the edges.
++  std::vector<float> premultiplied(source.rgba.size());
++  for (size_t i = 0; i < source.rgba.size(); i += 4) {
++    const float a = source.rgba[i + 3] / 255.0f;
++    for (int c = 0; c < 3; ++c) premultiplied[i + c] = source.rgba[i + c] * a;
++    premultiplied[i + 3] = source.rgba[i + 3];
++  }
++  const auto columns = Taps(source.width, width), rows = Taps(source.height, height);
++  std::vector<float> horizontal(size_t(width) * source.height * 4, 0);
++  for (uint32_t y = 0; y < source.height; ++y)
++    for (uint32_t x = 0; x < width; ++x) {
++      float* out = &horizontal[(size_t(y) * width + x) * 4];
++      for (const Tap& tap : columns[x]) {
++        const float* in = &premultiplied[(size_t(y) * source.width + tap.index) * 4];
++        for (int c = 0; c < 4; ++c) out[c] += in[c] * tap.weight;
++      }
++    }
++  Image image = Blank(width, height);
++  for (uint32_t y = 0; y < height; ++y)
++    for (uint32_t x = 0; x < width; ++x) {
++      float sum[4] = {};
++      for (const Tap& tap : rows[y]) {
++        const float* in = &horizontal[(size_t(tap.index) * width + x) * 4];
++        for (int c = 0; c < 4; ++c) sum[c] += in[c] * tap.weight;
++      }
++      uint8_t* p = &image.rgba[(size_t(y) * width + x) * 4];
++      const float a = std::clamp(sum[3], 0.0f, 255.0f);
++      p[3] = uint8_t(a + 0.5f);
++      for (int c = 0; c < 3; ++c)
++        p[c] = a > 0 ? uint8_t(std::clamp(sum[c] / (a / 255.0f), 0.0f, 255.0f) + 0.5f) : 0;
++    }
++  return image;
++}
++
++std::optional<Image> Load(std::string_view source) {
++  constexpr std::string_view kPrefix = "achievement/";
++  const size_t at = source.find(kPrefix);
++  if (at == std::string_view::npos) return std::nullopt;
++  source.remove_prefix(at + kPrefix.size());
++  std::vector<std::string_view> parts;
++  for (size_t start = 0;;) {
++    const size_t slash = source.find('/', start);
++    parts.push_back(source.substr(start, slash == std::string_view::npos ? slash : slash - start));
++    if (slash == std::string_view::npos) break;
++    start = slash + 1;
++  }
++  constexpr uint32_t kMax = 2048;
++  uint32_t a = 0, b = 0;
++  const std::string_view kind = parts[0];
++  if ((kind == "icon" || kind == "locked") && parts.size() == 3 && Number(parts[1], a) && Number(parts[2], b) &&
++      b > 0 && b <= kMax)
++    return Icon(a, b, kind == "locked");
++  if (kind == "shine" && parts.size() == 2) {
++    const size_t x = parts[1].find('x');
++    if (x != std::string_view::npos && Number(parts[1].substr(0, x), a) && Number(parts[1].substr(x + 1), b) &&
++        a > 0 && b > 0 && a <= kMax && b <= kMax)
++      return Shine(a, b);
++    return std::nullopt;
++  }
++  if (parts.size() != 2 || !Number(parts[1], a) || a == 0 || a > kMax) return std::nullopt;
++  if (kind == "orb") return Orb(a);
++  if (kind == "trophy") return Trophy(a);
++  if (kind == "lights") return Lights(a);
++  if (kind == "glow") return Glow(a);
++  if (kind == "lock") return Lock(a);
++  return std::nullopt;
++}
++
++}  // namespace narutorise::menu::achievement_art
+diff --git a/app/src/menu/achievement_art.h b/app/src/menu/achievement_art.h
+new file mode 100644
+index 0000000..f60eefa
+--- /dev/null
++++ b/app/src/menu/achievement_art.h
+@@ -0,0 +1,47 @@
++// The images of the achievement toast and list, made on the CPU at the exact
++// pixel size they show at, so they stay sharp at any window size: the game's
++// own achievement icons (PNG in the title's XDBF, 64x64) resampled with a
++// Catmull-Rom filter and rounded, their locked versions, the orb of the toast
++// (a local file, or a neutral procedural sphere without it), and the lights,
++// glow, shine and padlock, which are procedural. RmlUi asks for them by
++// source (RenderInterface::LoadTexture):
++//   achievement/icon/<image id>/<px>     the icon, rounded corners
++//   achievement/locked/<image id>/<px>   the icon dimmed and desaturated
++//   achievement/orb/<px>                 the orb of the toast and the list
++//   achievement/trophy/<px>              a green trophy on a black disc, the
++//                                        orb's other face in the toast
++//   achievement/lights/<px>              two comets running around a ring
++//   achievement/glow/<px>                a soft round glow
++//   achievement/shine/<w>x<h>            a slanted band of light
++//   achievement/lock/<px>                a padlock badge
++// UI thread only, as RmlUi.
++#pragma once
++
++#include <cstdint>
++#include <filesystem>
++#include <functional>
++#include <optional>
++#include <span>
++#include <string_view>
++#include <vector>
++
++namespace narutorise::menu::achievement_art {
++
++struct Image {
++  uint32_t width = 0, height = 0;
++  std::vector<uint8_t> rgba;  // Straight alpha, rows top to bottom.
++};
++
++// The PNG bytes of an achievement image by its XDBF image id; empty without one.
++void SetIconSource(std::function<std::vector<uint8_t>(uint32_t image_id)> source);
++// The orb's image file (any format stb decodes); a procedural sphere without it.
++void SetOrbFile(std::filesystem::path path);
++
++// The image of an achievement/... source, or nothing for another source.
++std::optional<Image> Load(std::string_view source);
++
++// Exposed for tests.
++Image Resample(const Image& source, uint32_t width, uint32_t height);
++Image Decode(std::span<const uint8_t> bytes);
++
++}  // namespace narutorise::menu::achievement_art
+diff --git a/app/src/menu/achievement_sound.cpp b/app/src/menu/achievement_sound.cpp
+new file mode 100644
+index 0000000..9c118c8
+--- /dev/null
++++ b/app/src/menu/achievement_sound.cpp
+@@ -0,0 +1,57 @@
++// The sound of an unlocked achievement (achievement_sound.h).
++#include "menu/achievement_sound.h"
++
++#include <SDL3/SDL.h>
++#include <rex/logging.h>
++
++namespace narutorise::menu {
++
++bool AchievementSound::Load() {
++  if (stream_) return true;
++  if (failed_ || path_.empty()) return false;
++  failed_ = true;  // Until it opens: a missing file or device is reported once.
++  std::error_code ec;
++  if (!std::filesystem::is_regular_file(path_, ec)) {
++    REXLOG_INFO("[narutorise] Achievements: no unlock sound at {}", path_.string());
++    return false;
++  }
++  if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
++    REXLOG_WARN("[narutorise] Achievements: no audio for the unlock sound: {}", SDL_GetError());
++    return false;
++  }
++  audio_ = true;
++  SDL_AudioSpec spec{};
++  if (!SDL_LoadWAV(path_.string().c_str(), &spec, &samples_, &size_)) {
++    REXLOG_WARN("[narutorise] Achievements: the unlock sound {} did not load: {}", path_.string(), SDL_GetError());
++    return false;
++  }
++  stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
++  if (!stream_) {
++    REXLOG_WARN("[narutorise] Achievements: no output for the unlock sound: {}", SDL_GetError());
++    return false;
++  }
++  // A little under full scale, so it sits with the game's mix instead of over it.
++  SDL_SetAudioStreamGain(stream_, 0.85f);
++  failed_ = false;
++  return true;
++}
++
++void AchievementSound::Play() {
++  if (!Load()) return;
++  SDL_ClearAudioStream(stream_);
++  SDL_PutAudioStreamData(stream_, samples_, int(size_));
++  SDL_FlushAudioStream(stream_);
++  SDL_ResumeAudioStreamDevice(stream_);
++}
++
++void AchievementSound::Shutdown() {
++  if (stream_) SDL_DestroyAudioStream(stream_);
++  stream_ = nullptr;
++  if (samples_) SDL_free(samples_);
++  samples_ = nullptr;
++  size_ = 0;
++  if (audio_) SDL_QuitSubSystem(SDL_INIT_AUDIO);
++  audio_ = false;
++}
++
++}  // namespace narutorise::menu
+diff --git a/app/src/menu/achievement_sound.h b/app/src/menu/achievement_sound.h
+new file mode 100644
+index 0000000..424f8d7
+--- /dev/null
++++ b/app/src/menu/achievement_sound.h
+@@ -0,0 +1,29 @@
++// The sound of an unlocked achievement: a WAV file played through SDL's
++// default output, opened on the first unlock and kept for the next ones.
++// Without the file the toast is silent. UI thread.
++#pragma once
++
++#include <cstdint>
++#include <filesystem>
++
++struct SDL_AudioStream;
++
++namespace narutorise::menu {
++
++class AchievementSound {
++ public:
++  ~AchievementSound() { Shutdown(); }
++  void SetFile(std::filesystem::path path) { Shutdown(); path_ = std::move(path); failed_ = false; }
++  void Play();
++  void Shutdown();
++
++ private:
++  bool Load();
++  std::filesystem::path path_;
++  bool failed_ = false, audio_ = false;
++  uint8_t* samples_ = nullptr;
++  uint32_t size_ = 0;
++  SDL_AudioStream* stream_ = nullptr;
++};
++
++}  // namespace narutorise::menu
+diff --git a/app/src/menu/achievements.cpp b/app/src/menu/achievements.cpp
+new file mode 100644
+index 0000000..bef5756
+--- /dev/null
++++ b/app/src/menu/achievements.cpp
+@@ -0,0 +1,503 @@
++// The achievement toast and list (achievements.h).
++#include "menu/achievements.h"
++
++#include "menu/text.h"
++#include <algorithm>
++#include <cmath>
++#include <ctime>
++#include <RmlUi/Core.h>
++#include <fmt/format.h>
++#include <rex/logging.h>
++
++namespace narutorise::menu {
++namespace {
++
++constexpr float kPi = 3.14159265358979f;
++
++// The toast's timeline in seconds: the medal pops in (0-0.45), opens into the
++// pill (0.35-0.95), the words come in (0.8-1.2) and a light crosses it; the
++// ring blinks green, then holds (to 5.55), closes (5.85-6.35) and the medal
++// spins twice (6.2-6.92) and vanishes (6.72-7.02). While open, the orb and a
++// green trophy take turns in the ring about once a second, each change a
++// short blink.
++constexpr float kToastEnd = 7.1f;
++constexpr float kMedal = 64;          // dp: the medal and the height of the pill.
++constexpr float kWordsLeft = 78;      // dp
++constexpr auto kToastGap = std::chrono::milliseconds(350);
++// The changes between the orb and the trophy, about one a second: the trophy
++// shows after the odd ones, and the orb is back for the spin at the end.
++constexpr float kFaceChanges[] = {1.2f, 2.2f, 3.2f, 4.2f, 5.2f, 6.2f};
++constexpr float kBlink = 0.07f;  // Seconds each face takes to go out, and the next to come in.
++
++float Phase(float t, float start, float end) { return std::clamp((t - start) / (end - start), 0.0f, 1.0f); }
++float Lerp(float a, float b, float t) { return a + (b - a) * t; }
++float OutCubic(float x) { return 1 - std::pow(1 - x, 3.0f); }
++float InCubic(float x) { return x * x * x; }
++float InOutCubic(float x) { return x < 0.5f ? 4 * x * x * x : 1 - std::pow(-2 * x + 2, 3.0f) / 2; }
++float OutBack(float x) {
++  constexpr float c1 = 1.70158f, c3 = c1 + 1;
++  return 1 + c3 * std::pow(x - 1, 3.0f) + c1 * std::pow(x - 1, 2.0f);
++}
++float Seconds(std::chrono::steady_clock::duration d) { return std::chrono::duration<float>(d).count(); }
++
++std::string Escape(const std::string& text) { return Rml::StringUtilities::EncodeRml(text); }
++std::string Dp(float value) { return fmt::format("{:.3f}dp", value); }
++void Set(Rml::Element* element, const char* property, const std::string& value) { element->SetProperty(property, value); }
++void Set(Rml::Element* element, const char* property, float value) {
++  element->SetProperty(property, fmt::format("{:.4f}", std::clamp(value, 0.0f, 1.0f)));
++}
++
++std::string Fill(std::string_view pattern, std::string_view value) {
++  const size_t at = pattern.find("%s");
++  if (at == std::string_view::npos) return std::string(pattern);
++  return std::string(pattern.substr(0, at)).append(value).append(pattern.substr(at + 2));
++}
++
++// A local date and time in the customary order of the language.
++std::string FormatDate(uint64_t filetime, size_t language) {
++  constexpr uint64_t kUnixEpoch = 116444736000000000ull;  // 1970-01-01 in FILETIME.
++  if (filetime <= kUnixEpoch) return {};
++  const std::time_t seconds = std::time_t((filetime - kUnixEpoch) / 10000000ull);
++  std::tm local{};
++#ifdef _WIN32
++  if (localtime_s(&local, &seconds) != 0) return {};
++#else
++  if (!localtime_r(&seconds, &local)) return {};
++#endif
++  const char* format = language == 0 ? "%m/%d/%Y  %H:%M"
++                       : language == 3 || language == 6 ? "%d.%m.%Y  %H:%M"
++                                                       : "%d/%m/%Y  %H:%M";
++  char text[64];
++  return std::strftime(text, sizeof(text), format, &local) ? text : std::string{};
++}
++
++constexpr const char* kFilters[] = {"ach-filter-all", "ach-filter-unlocked", "ach-filter-locked"};
++constexpr const char* kSorts[] = {"ach-sort-recent", "ach-sort-game", "ach-sort-score", "ach-sort-name"};
++
++}  // namespace
++
++int Achievements::Px(float dp) const { return std::max(1, int(std::lround(dp * ratio_))); }
++
++void Achievements::SetGamepadHints(bool gamepad) {
++  gamepad_ = gamepad;
++  SetHints();
++}
++
++// The controls of the list as the controller's buttons (A green, B red, X
++// blue, the bumpers) or as keycaps, after the last input used.
++void Achievements::SetHints() {
++  if (!list_) return;
++  auto* hints = list_->GetElementById("hints");
++  if (!hints) return;
++  const auto hint = [this](const std::string& keys, const char* label) {
++    return fmt::format("<span class=\"hint\">{}{}</span>", keys, Escape(TextIn(label, language_)));
++  };
++  std::string rml;
++  if (gamepad_) {
++    rml = hint("<span class=\"cap dark\">↑↓</span>", "ach-hint-browse") +
++          hint("<span class=\"cap dark bumper\">LB</span><span class=\"cap dark bumper\">RB</span>", "ach-hint-filter") +
++          hint("<span class=\"btn x\">X</span>", "ach-hint-sort") + hint("<span class=\"btn b\">B</span>", "ach-hint-close");
++  } else {
++    rml = hint("<span class=\"cap\">↑</span><span class=\"cap\">↓</span>", "ach-hint-browse") +
++          hint("<span class=\"cap\">‹</span><span class=\"cap\">›</span>", "ach-hint-filter") +
++          hint("<span class=\"cap\">S</span>", "ach-hint-sort") + hint("<span class=\"cap\">Esc</span>", "ach-hint-close");
++  }
++  hints->SetInnerRML(rml);
++}
++
++// Cuts text that does not fit its element with an ellipsis, on whole UTF-8 characters.
++static void Ellipsize(Rml::Element* element, const std::string& text) {
++  const int room = int(element->GetClientWidth());
++  if (room <= 0 || Rml::ElementUtilities::GetStringWidth(element, text) <= room) return;
++  std::vector<size_t> ends;  // Where each character ends.
++  for (size_t i = 1; i <= text.size(); ++i)
++    if (i == text.size() || (uint8_t(text[i]) & 0xC0) != 0x80) ends.push_back(i);
++  size_t low = 0, high = ends.size();  // The longest prefix that fits with the ellipsis.
++  while (low < high) {
++    const size_t mid = (low + high + 1) / 2;
++    std::string candidate = text.substr(0, ends[mid - 1]);
++    while (!candidate.empty() && candidate.back() == ' ') candidate.pop_back();
++    if (Rml::ElementUtilities::GetStringWidth(element, candidate + "…") <= room) low = mid;
++    else high = mid - 1;
++  }
++  std::string cut = low ? text.substr(0, ends[low - 1]) : std::string{};
++  while (!cut.empty() && cut.back() == ' ') cut.pop_back();
++  element->SetInnerRML(Escape(cut + "…"));
++}
++
++void Achievements::Push(Achievement achievement) { queue_.push_back(std::move(achievement)); }
++
++std::optional<uint32_t> Achievements::ToastId() const {
++  if (toast_on_ && current_) return current_->id;
++  return std::nullopt;
++}
++
++void Achievements::SkipToast() {
++  if (toast_on_) EndToast(Clock::now() - kToastGap);
++}
++
++void Achievements::StartToast(Rml::Context& context) {
++  if (!toast_) {
++    toast_ = context.LoadDocument("achievement_toast.rml");
++    const auto get = [this](const char* id) { return toast_ ? toast_->GetElementById(id) : nullptr; };
++    parts_ = {get("toast"), get("pill"), get("shine"), get("words"), get("toast-title"), get("toast-name"),
++              get("toast-icon"), get("icon-frame"), get("medal"), get("glow"), get("ring"), get("lights"), get("orb"),
++              get("trophy")};
++    const Rml::Element* all[] = {parts_.box, parts_.pill, parts_.shine, parts_.words, parts_.title,
++                                 parts_.name, parts_.icon, parts_.frame, parts_.medal, parts_.glow,
++                                 parts_.ring, parts_.lights, parts_.orb, parts_.trophy};
++    if (std::find(std::begin(all), std::end(all), nullptr) != std::end(all)) {
++      REXLOG_WARN("[narutorise] Achievements: the toast document did not load");
++      if (toast_) toast_->Close();
++      toast_ = nullptr;
++      queue_.clear();
++      return;
++    }
++  }
++  current_ = std::move(queue_.front());
++  queue_.pop_front();
++  // Every image at the pixel size it shows at.
++  parts_.orb->SetAttribute("src", fmt::format("achievement/orb/{}", Px(45.333f)));
++  parts_.trophy->SetAttribute("src", fmt::format("achievement/trophy/{}", Px(45.333f)));
++  parts_.lights->SetAttribute("src", fmt::format("achievement/lights/{}", Px(kMedal)));
++  parts_.glow->SetAttribute("src", fmt::format("achievement/glow/{}", Px(150)));
++  parts_.shine->SetAttribute("src", fmt::format("achievement/shine/{}x{}", Px(96), Px(58.667f)));
++  parts_.icon->SetAttribute("src", fmt::format("achievement/icon/{}/{}", current_->image_id, Px(44)));
++  const std::string title = TextIn("ach-toast", language_);
++  const std::string name = fmt::format("{} G  –  {}", current_->gamerscore, current_->name);
++  parts_.title->SetInnerRML(Escape(title));
++  parts_.name->SetInnerRML(fmt::format("<span class=\"g\">{} G</span>  –  {}", current_->gamerscore,
++                                       Escape(current_->name)));
++  toast_->Show(Rml::ModalFlag::None, Rml::FocusFlag::None);
++  toast_->PullToFront();
++  toast_->UpdateDocument();  // The fonts of the words, to measure them.
++  const float words = float(std::max(Rml::ElementUtilities::GetStringWidth(parts_.title, title),
++                                     Rml::ElementUtilities::GetStringWidth(parts_.name, name))) / ratio_;
++  // The medal, the words, the icon at the right end with its margins.
++  width_ = std::clamp(kWordsLeft + words + 20 + 47 + 12, 300.0f, 860.0f);
++  toast_start_ = Clock::now();
++  toast_on_ = true;
++  ToastFrame(0);
++  sound_.Play();
++  REXLOG_INFO("[narutorise] Achievement toast: {} ({} G)", current_->name, current_->gamerscore);
++}
++
++void Achievements::ToastFrame(float t) {
++  // The medal: pops in with an overshoot, spins twice at the end and shrinks away.
++  const float vanish = Phase(t, 6.72f, 7.02f);
++  const float scale = Lerp(0.2f, 1, OutBack(Phase(t, 0, 0.45f))) * Lerp(1, 0.5f, InCubic(vanish));
++  const float spin = 720 * InOutCubic(Phase(t, 6.2f, 6.92f));
++  Set(parts_.medal, "transform", fmt::format("rotate({:.2f}deg) scale({:.4f})", spin, scale));
++  Set(parts_.medal, "opacity", Phase(t, 0, 0.16f) * (1 - vanish));
++  // A flash of light behind it as it pops, then a faint halo while open.
++  // The orb and the trophy take turns: both go dark for a moment at each change.
++  size_t changes = 0;
++  float nearest = 1e9f;
++  for (const float change : kFaceChanges) {
++    changes += t >= change;
++    nearest = std::min(nearest, std::fabs(t - change));
++  }
++  const bool trophy = changes % 2 == 1;
++  const float blink = std::clamp(nearest / kBlink, 0.0f, 1.0f);
++  Set(parts_.orb, "opacity", trophy ? 0.0f : blink);
++  Set(parts_.trophy, "opacity", trophy ? blink : 0.0f);
++  // A flash of light behind it as it pops and at each change, a faint halo while open.
++  const float flash = Phase(t, 0.08f, 0.3f) * (1 - Phase(t, 0.3f, 1.1f));
++  const float halo = 0.3f * Phase(t, 0.3f, 1.1f) * (1 - Phase(t, 5.9f, 6.4f));
++  const float pulse = 0.35f * (1 - std::clamp(nearest / 0.3f, 0.0f, 1.0f)) * (t < 6.4f ? 1.0f : 0.0f);
++  Set(parts_.glow, "opacity", flash + halo + pulse);
++  // The lights running around the orb inside its ring.
++  Set(parts_.lights, "transform", fmt::format("rotate({:.2f}deg)", t * 300));
++  Set(parts_.lights, "opacity", Phase(t, 0.25f, 0.65f) * (1 - Phase(t, 6.55f, 6.9f)));
++  // The top of the ring blinks green, then stays lit.
++  const bool lit = t >= 1.0f && (t >= 3.4f || int((t - 1.0f) / 0.24f) % 2 == 0);
++  Set(parts_.ring, "border-top-color", std::string(lit ? "#8dc63f" : "#605b57"));
++  // The pill opens from the medal, centered, and closes back into it.
++  const float open = OutCubic(Phase(t, 0.35f, 0.95f)) * (1 - InOutCubic(Phase(t, 5.85f, 6.35f)));
++  const float width = Lerp(kMedal, width_, open);
++  Set(parts_.box, "width", Dp(width));
++  Set(parts_.box, "margin-left", Dp(-width / 2));
++  Set(parts_.pill, "opacity", Phase(t, 0.3f, 0.4f) * (1 - Phase(t, 6.3f, 6.4f)));
++  // The words slide in; the icon pops at the right end.
++  const float out = Phase(t, 5.55f, 5.85f);
++  const float in = OutCubic(Phase(t, 0.8f, 1.2f));
++  Set(parts_.words, "opacity", in * (1 - out));
++  Set(parts_.words, "left", Dp(kWordsLeft + 14 * (1 - in)));
++  const float icon = Phase(t, 0.9f, 1.3f);
++  const std::string icon_scale = fmt::format("scale({:.4f})", Lerp(0.6f, 1, OutBack(icon)));
++  for (Rml::Element* element : {parts_.icon, parts_.frame}) {
++    Set(element, "opacity", icon * (1 - out));
++    Set(element, "transform", icon_scale);
++  }
++  // One sweep of light across the open pill.
++  const float sweep = Phase(t, 1.05f, 1.85f);
++  Set(parts_.shine, "left", Dp(Lerp(56, std::max(56.0f, width_ - 56 - 96), InOutCubic(sweep))));
++  Set(parts_.shine, "opacity", std::sin(kPi * sweep));
++}
++
++void Achievements::EndToast(Clock::time_point now) {
++  if (toast_) toast_->Hide();
++  toast_on_ = false;
++  current_.reset();
++  next_toast_ = now + kToastGap;
++}
++
++void Achievements::Tick(Rml::Context& context) {
++  ratio_ = context.GetDensityIndependentPixelRatio();
++  for (auto& rebuild : std::exchange(deferred_, {})) rebuild();
++  const auto now = Clock::now();
++  if (list_) {
++    const float t = Seconds(now - list_start_);
++    if (auto* lights = list_->GetElementById("head-lights"))
++      Set(lights, "transform", fmt::format("rotate({:.2f}deg)", std::fmod(t * 120, 360.0f)));
++    // It fades in and rises a little as it opens (no transform: the list scrolls with scissors).
++    const float open = OutCubic(Phase(t, 0, 0.22f));
++    if (auto* veil = list_->GetElementById("veil")) Set(veil, "opacity", open);
++    if (auto* sheet = list_->GetElementById("sheet")) {
++      Set(sheet, "opacity", open);
++      Set(sheet, "margin-top", Dp(-292 + 14 * (1 - open)));
++    }
++  }
++  if (!toast_on_ && !queue_.empty() && !list_ && now >= next_toast_) StartToast(context);
++  if (!toast_on_) return;
++  const float t = Seconds(now - toast_start_);
++  if (t >= kToastEnd) EndToast(now);
++  else ToastFrame(t);
++}
++
++bool Achievements::ShowList(Rml::Context& context, std::string game, std::vector<Achievement> list, uint32_t focus,
++                            std::function<void()> close) {
++  HideList();
++  ratio_ = context.GetDensityIndependentPixelRatio();
++  list_ = context.LoadDocument("achievements.rml");
++  if (!list_) {
++    REXLOG_WARN("[narutorise] Achievements: the list document did not load");
++    return false;
++  }
++  items_ = std::move(list);
++  game_ = std::move(game);
++  close_ = std::move(close);
++  close_pending_ = false;
++  filter_ = 0;
++  sort_ = 0;
++  selected_ = 0;
++  selected_id_ = focus;
++  list_start_ = Clock::now();
++  for (const char* event : {"keydown", "click", "mouseover"}) list_->AddEventListener(event, this);
++  FillHeader();
++  Rebuild();
++  list_->Show(Rml::ModalFlag::None, Rml::FocusFlag::Document);
++  list_->PullToFront();
++  // The list takes the place of the toast, as the console's guide did.
++  SkipToast();
++  return true;
++}
++
++void Achievements::HideList() {
++  if (!list_) return;
++  for (const char* event : {"keydown", "click", "mouseover"}) list_->RemoveEventListener(event, this);
++  list_->Close();
++  list_ = nullptr;
++  items_.clear();
++  view_.clear();
++  deferred_.clear();
++  close_ = {};
++  close_pending_ = false;
++}
++
++std::function<void()> Achievements::TakePending() {
++  if (!close_pending_) return {};
++  close_pending_ = false;
++  if (close_) return close_;
++  return [this] { HideList(); };
++}
++
++void Achievements::FillHeader() {
++  size_t unlocked = 0;
++  uint32_t score = 0, total = 0;
++  for (const Achievement& a : items_) {
++    total += a.gamerscore;
++    if (a.unlocked) ++unlocked, score += a.gamerscore;
++  }
++  const auto set = [this](const char* id, const std::string& rml) {
++    if (auto* element = list_->GetElementById(id)) element->SetInnerRML(rml);
++  };
++  set("head-title", Escape(TextIn("ach-title", language_)));
++  set("head-game", Escape(game_));
++  set("count-value", fmt::format("{}<span class=\"of\"> / {}</span>", unlocked, items_.size()));
++  set("count-label", Escape(TextIn("ach-count-label", language_)));
++  set("score-value", fmt::format("{}<span class=\"of\"> / {} G</span>", score, total));
++  set("score-label", Escape(TextIn("ach-score-label", language_)));
++  if (auto* fill = list_->GetElementById("progress-fill"))
++    Set(fill, "width", fmt::format("{:.2f}%", total ? 100.0 * score / total : 0.0));
++  const auto image = [this](const char* id, const std::string& source) {
++    if (auto* element = list_->GetElementById(id)) element->SetAttribute("src", source);
++  };
++  image("head-orb", fmt::format("achievement/orb/{}", Px(56)));
++  image("head-lights", fmt::format("achievement/lights/{}", Px(76)));
++  image("detail-glow", fmt::format("achievement/glow/{}", Px(280)));
++  image("detail-lock", fmt::format("achievement/lock/{}", Px(54.667f)));
++  SetHints();
++}
++
++void Achievements::Rebuild() {
++  if (!list_) return;
++  size_t counts[3] = {items_.size(), 0, 0};
++  for (const Achievement& a : items_) ++counts[a.unlocked ? 1 : 2];
++  std::string filters;
++  for (int i = 0; i < 3; ++i)
++    filters += fmt::format("<span class=\"filter{}\" id=\"filter-{}\">{}  <span class=\"n\">{}</span></span>",
++                           i == filter_ ? " selected" : "", i, Escape(TextIn(kFilters[i], language_)), counts[i]);
++  if (auto* element = list_->GetElementById("filters")) element->SetInnerRML(filters);
++  if (auto* element = list_->GetElementById("sort"))
++    element->SetInnerRML(Escape(Fill(TextIn("ach-sort-format", language_), TextIn(kSorts[sort_], language_))));
++
++  const auto hidden = [](const Achievement& a) { return a.secret && !a.unlocked; };
++  const auto shown_name = [&](const Achievement& a) {
++    return Rml::StringUtilities::ToLower(hidden(a) ? std::string(TextIn("ach-secret", language_)) : a.name);
++  };
++  view_.clear();
++  for (size_t i = 0; i < items_.size(); ++i)
++    if (filter_ == 0 || (filter_ == 1) == items_[i].unlocked) view_.push_back(i);
++  std::stable_sort(view_.begin(), view_.end(), [&](size_t l, size_t r) {
++    const Achievement &a = items_[l], &b = items_[r];
++    switch (sort_) {
++      case 0:  // Recent: the latest unlocks first, then the rest in the game's order.
++        if (a.unlocked != b.unlocked) return a.unlocked;
++        if (a.unlocked && a.unlock_time != b.unlock_time) return a.unlock_time > b.unlock_time;
++        return a.id < b.id;
++      case 2:
++        if (a.gamerscore != b.gamerscore) return a.gamerscore > b.gamerscore;
++        if (a.unlocked != b.unlocked) return a.unlocked;
++        return a.id < b.id;
++      case 3: return shown_name(a) < shown_name(b);
++      default: return a.id < b.id;
++    }
++  });
++
++  std::string rows;
++  std::vector<std::pair<std::string, std::string>> texts;
++  for (size_t k = 0; k < view_.size(); ++k) {
++    const Achievement& a = items_[view_[k]];
++    const std::string icon = hidden(a) ? fmt::format("achievement/lock/{}", Px(48))
++                                       : fmt::format("achievement/{}/{}/{}", a.unlocked ? "icon" : "locked",
++                                                     a.image_id, Px(48));
++    const std::string name = hidden(a) ? std::string(TextIn("ach-secret", language_)) : a.name;
++    const std::string sub = a.unlocked ? a.description
++                            : hidden(a) ? std::string(TextIn("ach-secret-text", language_))
++                                        : (a.locked_description.empty() ? a.description : a.locked_description);
++    rows += fmt::format(
++        "<div class=\"row{}\" id=\"row-{}\"><div class=\"mark\"/><img class=\"row-icon\" src=\"{}\"/>"
++        "<span class=\"row-name\" id=\"name-{}\">{}</span><span class=\"row-sub\" id=\"sub-{}\">{}</span>"
++        "<span class=\"row-score\">{} G</span></div>",
++        a.unlocked ? "" : " locked", k, icon, k, Escape(name), k, Escape(sub), a.gamerscore);
++    texts.emplace_back(name, sub);
++  }
++  if (rows.empty()) rows = fmt::format("<span class=\"empty\">{}</span>", Escape(TextIn("ach-empty", language_)));
++  if (auto* element = list_->GetElementById("list")) element->SetInnerRML(rows);
++  list_->UpdateDocument();  // The rows' widths and fonts, for the ellipses.
++  for (size_t k = 0; k < texts.size(); ++k) {
++    if (auto* name = list_->GetElementById(fmt::format("name-{}", k))) Ellipsize(name, texts[k].first);
++    if (auto* sub = list_->GetElementById(fmt::format("sub-{}", k))) Ellipsize(sub, texts[k].second);
++  }
++
++  size_t row = 0;
++  for (size_t k = 0; k < view_.size(); ++k)
++    if (items_[view_[k]].id == selected_id_) row = k;
++  selected_ = row;
++  if (auto* detail = list_->GetElementById("detail")) detail->SetProperty("visibility", view_.empty() ? "hidden" : "visible");
++  Select(row, true);
++}
++
++void Achievements::Select(size_t row, bool scroll) {
++  if (!list_ || view_.empty()) return;
++  row = std::min(row, view_.size() - 1);
++  if (auto* previous = list_->GetElementById(fmt::format("row-{}", selected_))) previous->SetClass("selected", false);
++  selected_ = row;
++  selected_id_ = items_[view_[row]].id;
++  if (auto* element = list_->GetElementById(fmt::format("row-{}", row))) {
++    element->SetClass("selected", true);
++    if (scroll) element->ScrollIntoView(Rml::ScrollIntoViewOptions(Rml::ScrollAlignment::Nearest));
++  }
++  Describe(items_[view_[row]]);
++}
++
++void Achievements::Describe(const Achievement& a) {
++  const bool hidden = a.secret && !a.unlocked;
++  auto* detail = list_->GetElementById("detail");
++  if (!detail) return;
++  detail->SetClass("locked", !a.unlocked);
++  detail->SetClass("secret", hidden);
++  const auto set = [this](const char* id, const std::string& text) {
++    if (auto* element = list_->GetElementById(id)) element->SetInnerRML(Escape(text));
++  };
++  if (auto* icon = list_->GetElementById("detail-icon"))
++    icon->SetAttribute("src", hidden ? fmt::format("achievement/lock/{}", Px(156))
++                                     : fmt::format("achievement/{}/{}/{}", a.unlocked ? "icon" : "locked", a.image_id,
++                                                   Px(156)));
++  set("detail-name", hidden ? std::string(TextIn("ach-secret", language_)) : a.name);
++  set("detail-score", fmt::format("{} G", a.gamerscore));
++  set("detail-state", TextIn(a.unlocked ? "ach-state-unlocked" : "ach-state-locked", language_));
++  set("detail-text", a.unlocked ? a.description
++                     : hidden   ? std::string(TextIn("ach-secret-text", language_))
++                                : (a.locked_description.empty() ? a.description : a.locked_description));
++  const std::string date = a.unlocked ? FormatDate(a.unlock_time, language_) : std::string{};
++  set("detail-date", date.empty() ? std::string{} : Fill(TextIn("ach-unlocked-on", language_), date));
++}
++
++void Achievements::ProcessEvent(Rml::Event& event) {
++  if (!list_) return;
++  const Rml::String& type = event.GetType();
++  if (type == "keydown") {
++    using namespace Rml::Input;
++    const auto filter = [this](int step) {
++      deferred_.push_back([this, step] { filter_ = (filter_ + 3 + step) % 3; Rebuild(); });
++    };
++    switch (event.GetParameter<int>("key_identifier", 0)) {
++      case KI_UP: if (selected_ > 0) Select(selected_ - 1, true); break;
++      case KI_DOWN: Select(selected_ + 1, true); break;
++      case KI_HOME: Select(0, true); break;
++      case KI_END: if (!view_.empty()) Select(view_.size() - 1, true); break;
++      case KI_LEFT: case KI_PRIOR: filter(-1); break;
++      case KI_RIGHT: case KI_NEXT: filter(1); break;
++      case KI_DELETE: case KI_S:
++        deferred_.push_back([this] { sort_ = (sort_ + 1) % 4; Rebuild(); });
++        break;
++      case KI_ESCAPE: case KI_BACK: close_pending_ = true; break;
++      default: return;
++    }
++    event.StopPropagation();
++    return;
++  }
++  for (Rml::Element* target = event.GetTargetElement(); target && target != list_; target = target->GetParentNode()) {
++    const Rml::String& id = target->GetId();
++    if (id.rfind("row-", 0) == 0) {
++      Select(size_t(std::strtoul(id.c_str() + 4, nullptr, 10)), false);
++      return;
++    }
++    if (id.rfind("filter-", 0) == 0) {
++      if (type == "click") {
++        const int filter = id[7] - '0';
++        deferred_.push_back([this, filter] { filter_ = std::clamp(filter, 0, 2); Rebuild(); });
++      }
++      return;
++    }
++    if (id == "sheet-close") {
++      if (type == "click") close_pending_ = true;
++      return;
++    }
++  }
++}
++
++void Achievements::Shutdown() {
++  HideList();
++  if (toast_) toast_->Close();
++  toast_ = nullptr;
++  parts_ = {};
++  toast_on_ = false;
++  current_.reset();
++  queue_.clear();
++  sound_.Shutdown();
++}
++
++}  // namespace narutorise::menu
+diff --git a/app/src/menu/achievements.h b/app/src/menu/achievements.h
+new file mode 100644
+index 0000000..f207d53
+--- /dev/null
++++ b/app/src/menu/achievements.h
+@@ -0,0 +1,103 @@
++// The achievements in the RmlUi of the menus: the toast of an unlocked
++// achievement, after the Xbox 360 one (achievement_toast.rml), and the list of
++// all of them with progress, gamerscore, icons, descriptions and unlock dates
++// (achievements.rml), which the Guide button opens like the console's guide,
++// also while a toast shows. The data comes from the app (the SDK's
++// AchievementManager); this only presents it. UI thread.
++#pragma once
++
++#include "menu/achievement_sound.h"
++#include <RmlUi/Core/EventListener.h>
++#include <chrono>
++#include <cstdint>
++#include <deque>
++#include <filesystem>
++#include <functional>
++#include <optional>
++#include <string>
++#include <vector>
++
++namespace Rml {
++class Context;
++class Element;
++class ElementDocument;
++}  // namespace Rml
++
++namespace narutorise::menu {
++
++struct Achievement {
++  uint32_t id = 0, image_id = 0, gamerscore = 0;
++  std::string name, description, locked_description;
++  bool unlocked = false;
++  bool secret = false;        // Hidden until unlocked (no "show unachieved" flag in the title).
++  uint64_t unlock_time = 0;   // FILETIME (UTC, 100 ns since 1601); 0 when unknown.
++};
++
++class Achievements final : public Rml::EventListener {
++ public:
++  // The language of the words around the achievements (Localization::Language
++  // order). The app passes the game's, the language of the names themselves.
++  void SetLanguage(size_t language) { language_ = language; }
++  void SetSoundFile(std::filesystem::path path) { sound_.SetFile(std::move(path)); }
++  void SetGamepadHints(bool gamepad);
++
++  // Toasts show one after another, and wait while the list shows.
++  void Push(Achievement achievement);
++  bool ToastActive() const { return toast_on_ || !queue_.empty(); }
++  std::optional<uint32_t> ToastId() const;
++  void SkipToast();
++
++  // The list over everything else; focus: the id selected first (0: the first row).
++  bool ShowList(Rml::Context& context, std::string game, std::vector<Achievement> list, uint32_t focus,
++                std::function<void()> close);
++  void HideList();
++  bool ListShown() const { return list_ != nullptr; }
++
++  // A frame, before the context's Update: the toast's animation and the list's lights.
++  void Tick(Rml::Context& context);
++  // The close the list asked for (Esc, B, its close button), run outside the event.
++  std::function<void()> TakePending();
++  void Shutdown();
++  void ProcessEvent(Rml::Event& event) override;
++
++ private:
++  using Clock = std::chrono::steady_clock;
++  int Px(float dp) const;
++  void StartToast(Rml::Context& context);
++  void ToastFrame(float t);
++  void EndToast(Clock::time_point now);
++  void FillHeader();
++  void Rebuild();
++  void Select(size_t row, bool scroll);
++  void Describe(const Achievement& achievement);
++  void SetHints();
++
++  size_t language_ = 0;
++  bool gamepad_ = false;
++  float ratio_ = 1;
++  AchievementSound sound_;
++
++  std::deque<Achievement> queue_;
++  std::optional<Achievement> current_;
++  bool toast_on_ = false;
++  float width_ = 320;
++  Clock::time_point toast_start_{}, next_toast_{};
++  Rml::ElementDocument* toast_ = nullptr;
++  struct {
++    Rml::Element *box, *pill, *shine, *words, *title, *name, *icon, *frame, *medal, *glow, *ring, *lights, *orb, *trophy;
++  } parts_{};
++
++  Rml::ElementDocument* list_ = nullptr;
++  std::vector<Achievement> items_;
++  std::vector<size_t> view_;  // The rows: indices of items_, filtered and sorted.
++  size_t selected_ = 0;
++  uint32_t selected_id_ = 0;
++  int filter_ = 0, sort_ = 0;
++  std::string game_;
++  std::function<void()> close_;
++  bool close_pending_ = false;
++  std::vector<std::function<void()>> deferred_;  // Rebuilds after the event that asked.
++  Clock::time_point list_start_{};
++};
++
++}  // namespace narutorise::menu
+diff --git a/app/src/menu/assets.cpp b/app/src/menu/assets.cpp
+index 8ac380e..afd5838 100644
+--- a/app/src/menu/assets.cpp
++++ b/app/src/menu/assets.cpp
+@@ -66,6 +66,18 @@ constexpr uint8_t kStatus[] = {
+ constexpr uint8_t kStatusStyle[] = {
+ #embed "../../ui/status.rcss"
+ };
++constexpr uint8_t kAchievementToast[] = {
++#embed "../../ui/achievement_toast.rml"
++};
++constexpr uint8_t kAchievementToastStyle[] = {
++#embed "../../ui/achievement_toast.rcss"
++};
++constexpr uint8_t kAchievements[] = {
++#embed "../../ui/achievements.rml"
++};
++constexpr uint8_t kAchievementsStyle[] = {
++#embed "../../ui/achievements.rcss"
++};
+ #pragma clang diagnostic pop
+ 
+ struct Entry {
+@@ -91,6 +103,10 @@ constexpr std::array kAssets{
+     Entry{"overlay.rcss", kOverlayStyle},
+     Entry{"status.rml", kStatus},
+     Entry{"status.rcss", kStatusStyle},
++    Entry{"achievement_toast.rml", kAchievementToast},
++    Entry{"achievement_toast.rcss", kAchievementToastStyle},
++    Entry{"achievements.rml", kAchievements},
++    Entry{"achievements.rcss", kAchievementsStyle},
+ };
+ }  // namespace
+ 
+diff --git a/app/src/menu/home_button.h b/app/src/menu/home_button.h
+new file mode 100644
+index 0000000..4d6e93e
+--- /dev/null
++++ b/app/src/menu/home_button.h
+@@ -0,0 +1,22 @@
++// The controllers' Home (Guide, PS) button on macOS. GameController hands a
++// press to the app in front only while the app claims the button; SDL claims
++// it when it opens a controller and gives it back when it closes one, which
++// the game's input services do now and then. While the game runs,
++// ClaimHomeButton claims it again on every controller, so a press always
++// reaches the game (the achievements). macOS 26 acts on the press as well and
++// no app can stop it: for a game Apple has not listed for its Game Overlay it
++// opens the Games app, about half a second later, when the button is released.
++// So after a press the game took (NoteHomePress), the Games app the system
++// opens is closed again, or hidden when it was open already, and the game
++// stays in front. Elsewhere both do nothing. UI (main) thread.
++#pragma once
++
++namespace narutorise::menu {
++#ifdef __APPLE__
++void ClaimHomeButton();
++void NoteHomePress();
++#else
++inline void ClaimHomeButton() {}
++inline void NoteHomePress() {}
++#endif
++}  // namespace narutorise::menu
+diff --git a/app/src/menu/home_button_mac.mm b/app/src/menu/home_button_mac.mm
+new file mode 100644
+index 0000000..e86ddbf
+--- /dev/null
++++ b/app/src/menu/home_button_mac.mm
+@@ -0,0 +1,128 @@
++// The controllers' Home button on macOS (home_button.h).
++#include "menu/home_button.h"
++
++#import <AppKit/AppKit.h>
++#import <Foundation/Foundation.h>
++#import <GameController/GameController.h>
++#include <chrono>
++#include <string>
++#include <rex/logging.h>
++
++namespace narutorise::menu {
++namespace {
++
++using Clock = std::chrono::steady_clock;
++
++int claims_logged = 0;
++// The last press of the Home button the game took, while its window had the focus.
++Clock::time_point home_pressed{};
++NSDate* home_pressed_date = nil;
++// The system acts when the button is released, about half a second after the
++// game sees it pressed; a long press acts later still.
++constexpr auto kSystemDelay = std::chrono::seconds(3);
++NSString* const kGamesApp = @"com.apple.games";
++
++// Every button of the controller the system binds to a gesture, the Home
++// button first among them, is the game's while it is in front.
++void Claim(GCController* controller) API_AVAILABLE(macos(11.0)) {
++  if (!controller) return;
++  NSDictionary<NSString*, GCControllerButtonInput*>* buttons = controller.physicalInputProfile.buttons;
++  for (NSString* name in buttons) {
++    GCControllerButtonInput* button = buttons[name];
++    const bool home = [name isEqualToString:GCInputButtonHome];
++    if (!home && !button.boundToSystemGesture) continue;
++    if (button.preferredSystemGestureState == GCSystemGestureStateDisabled) continue;
++    button.preferredSystemGestureState = GCSystemGestureStateDisabled;
++    // Each time SDL gave it back; a few lines are enough to see it happen.
++    if (claims_logged < 8) {
++      ++claims_logged;
++      const char* product = controller.productCategory.UTF8String;
++      REXLOG_INFO("[narutorise] Controller button '{}' of {} claimed from the system (bound to a system gesture: {})",
++                  name.UTF8String, product ? product : "a controller", button.boundToSystemGesture ? "yes" : "no");
++    }
++  }
++}
++
++bool PressedRecently() { return home_pressed != Clock::time_point{} && Clock::now() - home_pressed < kSystemDelay; }
++
++// macOS 26 opens its Games app with the Home button whatever the game claims,
++// for a game Apple has not listed for its Game Overlay. Right after a press the
++// game took, that app gives way: closed when the press opened it, hidden when
++// it was open already, and the game is in front again.
++void GiveWay(NSRunningApplication* app) {
++  if (!app || ![app.bundleIdentifier isEqualToString:kGamesApp] || !PressedRecently() || app.terminated) return;
++  const double since_press = home_pressed_date ? [app.launchDate timeIntervalSinceDate:home_pressed_date] : -1;
++  const bool opened_by_press = app.launchDate && since_press > -0.5;
++  if (opened_by_press) [app forceTerminate];
++  else [app hide];
++  if (@available(macOS 14.0, *)) [NSApp activate];
++  else [NSApp activateIgnoringOtherApps:YES];
++  REXLOG_INFO("[narutorise] Home button: {} the Games app the system opened ({:.0f} ms after the press)",
++              opened_by_press ? "closed" : "hid",
++              std::chrono::duration<double, std::milli>(Clock::now() - home_pressed).count());
++  home_pressed = {};  // Once per press.
++}
++
++}  // namespace
++
++void NoteHomePress() {
++  home_pressed = Clock::now();
++  home_pressed_date = [NSDate date];
++}
++
++void ClaimHomeButton() {
++  if (@available(macOS 11.0, *)) {
++    static bool observing = false;
++    if (!observing) {
++      observing = true;
++      // A controller that connects is claimed at once, before its first press.
++      [[NSNotificationCenter defaultCenter] addObserverForName:GCControllerDidConnectNotification
++                                                        object:nil
++                                                         queue:[NSOperationQueue mainQueue]
++                                                    usingBlock:^(NSNotification* note) {
++                                                      Claim(note.object);
++                                                    }];
++      // The Games app as soon as the system starts or raises it.
++      NSNotificationCenter* workspace = [[NSWorkspace sharedWorkspace] notificationCenter];
++      for (NSNotificationName name in @[ NSWorkspaceDidLaunchApplicationNotification,
++                                         NSWorkspaceDidActivateApplicationNotification ]) {
++        [workspace addObserverForName:name
++                               object:nil
++                                queue:[NSOperationQueue mainQueue]
++                           usingBlock:^(NSNotification* note) {
++                             GiveWay(note.userInfo[NSWorkspaceApplicationKey]);
++                           }];
++      }
++    }
++    // Often enough that a controller SDL just closed and gave back is the
++    // game's again before a press: the check is a few property reads.
++    static auto last = Clock::time_point{};
++    const auto now = Clock::now();
++    if (now - last < std::chrono::milliseconds(100)) return;
++    last = now;
++    // In case a notification came before the press was noted.
++    if (PressedRecently())
++      for (NSRunningApplication* app in [NSRunningApplication runningApplicationsWithBundleIdentifier:kGamesApp])
++        if (app.active || [app.launchDate timeIntervalSinceDate:home_pressed_date] > -0.5) GiveWay(app);
++    NSArray<GCController*>* controllers = GCController.controllers;
++    // What the system shows the game, once per change of the controllers.
++    static NSUInteger described = NSUIntegerMax;
++    if (controllers.count != described) {
++      described = controllers.count;
++      REXLOG_INFO("[narutorise] Home button: {} controller(s) through GameController", controllers.count);
++      for (GCController* controller in controllers) {
++        GCControllerButtonInput* home = controller.physicalInputProfile.buttons[GCInputButtonHome];
++        const char* name = controller.vendorName.UTF8String;
++        REXLOG_INFO("[narutorise] Home button: {}: {}, bound to a system gesture: {}, state before the claim: {}",
++                    name ? name : "a controller", home ? "present" : "absent",
++                    home && home.boundToSystemGesture ? "yes" : "no",
++                    !home ? "-" : home.preferredSystemGestureState == GCSystemGestureStateDisabled ? "disabled"
++                          : home.preferredSystemGestureState == GCSystemGestureStateAlwaysReceive ? "always receive"
++                                                                                                  : "enabled");
++      }
++    }
++    for (GCController* controller in controllers) Claim(controller);
++  }
++}
++
++}  // namespace narutorise::menu
+diff --git a/app/src/menu/pad_input.cpp b/app/src/menu/pad_input.cpp
+index 76eb80f..8a8e4d6 100644
+--- a/app/src/menu/pad_input.cpp
++++ b/app/src/menu/pad_input.cpp
+@@ -65,6 +65,11 @@ void PadInput::Shortcut(bool held) {
+   held_ = held;
+   if (pressed && toggle_) toggle_();
+ }
++void PadInput::Guide(bool held) {
++  const bool pressed = held && !guide_held_;
++  guide_held_ = held;
++  if (pressed && guide_) guide_();
++}
+ void PadInput::PollDevices(const controls::Inventory& inventory, bool takes_input,
+                            const std::function<void(rex::ui::VirtualKey)>& key, bool allow_sticks) {
+   // Testing axes must not also move focus. Require neutral on leaving the
+@@ -75,8 +80,9 @@ void PadInput::PollDevices(const controls::Inventory& inventory, bool takes_inpu
+           (std::abs(d.raw.axes[0]) > .35 || std::abs(d.raw.axes[1]) > .35); }))
+     sticks_need_release_ = false;
+   const bool use_sticks = allow_sticks && !sticks_need_release_;
+-  uint32_t buttons=0;bool shortcut=false;
++  uint32_t buttons=0;bool shortcut=false,guide=false;
+   for(const auto& d:inventory.devices)if(!d.keyboard){
++    guide|=d.guide;
+     const auto bits=d.raw.buttons;const auto& axes=d.raw.axes;
+     const uint16_t chord=chord_=="L3+R3"?0xc0:chord_=="LB+RB+Start"?0x310:0x30;
+     shortcut|=(bits&chord)==chord;
+@@ -87,6 +93,6 @@ void PadInput::PollDevices(const controls::Inventory& inventory, bool takes_inpu
+     buttons|=(bits&0x1000)?16u:0;buttons|=(bits&0x2000)?32u:0;
+     buttons|=(bits&0x100)?64u:0;buttons|=(bits&0x200)?128u:0;buttons|=(bits&0x4000)?256u:0;
+   }
+-  auto now=std::chrono::steady_clock::now();Shortcut(shortcut);Navigate(takes_input?buttons:0,now,key);
++  auto now=std::chrono::steady_clock::now();Shortcut(shortcut);Guide(guide);Navigate(takes_input?buttons:0,now,key);
+ }
+ }  // namespace narutorise::menu
+diff --git a/app/src/menu/pad_input.h b/app/src/menu/pad_input.h
+index f6fa084..c1e64a2 100644
+--- a/app/src/menu/pad_input.h
++++ b/app/src/menu/pad_input.h
+@@ -19,6 +19,9 @@ class PadInput {
+                    const std::function<void(rex::ui::VirtualKey)>& key, bool allow_sticks = true);
+   void SetShortcut(std::string chord, std::function<void()> toggle) { chord_ = std::move(chord); toggle_ = std::move(toggle); }
+   void Shortcut(bool held);
++  // A press of the Guide button of any controller (the achievements).
++  void SetGuide(std::function<void()> guide) { guide_ = std::move(guide); }
++  void Guide(bool held);
+   // The same navigation path is used by physical and virtual controllers.
+   void Navigate(uint32_t buttons, std::chrono::steady_clock::time_point now,
+                 const std::function<void(rex::ui::VirtualKey)>& key);
+@@ -30,6 +33,8 @@ class PadInput {
+   std::string chord_ = "Back+Start";
+   std::function<void()> toggle_;
+   bool held_ = false;
++  std::function<void()> guide_;
++  bool guide_held_ = false;
+   std::array<std::chrono::steady_clock::time_point, 9> repeat_{};
+ };
+ }  // namespace narutorise::menu
+diff --git a/app/src/menu/render_interface.cpp b/app/src/menu/render_interface.cpp
+index 4b2b37e..97ff7c1 100644
+--- a/app/src/menu/render_interface.cpp
++++ b/app/src/menu/render_interface.cpp
+@@ -1,5 +1,6 @@
+ // The RmlUi render interface over rex::ui::ImmediateDrawer (render_interface.h).
+ #include "menu/render_interface.h"
++#include "menu/achievement_art.h"
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdint>
+@@ -142,6 +143,11 @@ Rml::TextureHandle RenderInterface::LoadTexture(Rml::Vector2i& dimensions, const
+     dimensions = {w, h};
+     return CreateImage(w, h, pixels.data());
+   }
++  if (auto image = achievement_art::Load(source)) {  // Made at its pixel size (achievement_art.h).
++    if (image->rgba.empty()) return 0;
++    dimensions = {int(image->width), int(image->height)};
++    return CreateImage(image->width, image->height, image->rgba.data());
++  }
+   Rml::FileInterface* files = Rml::GetFileInterface();
+   const Rml::FileHandle file = files ? files->Open(source) : 0;
+   if (!file) return 0;
+diff --git a/app/src/menu/text.cpp b/app/src/menu/text.cpp
+index 7edb55b..810a9ae 100644
+--- a/app/src/menu/text.cpp
++++ b/app/src/menu/text.cpp
+@@ -123,6 +123,29 @@ constexpr Entry strings[] = {
+  {"shader-option", {"Show shader indicator", "Mostrar indicador de shaders", "Afficher la compilation des shaders", "Shader-Anzeige einblenden", "Mostrar indicador de shaders", "Mostra indicatore shader", "Индикатор компиляции шейдеров"}},
+  {"menu-key", {"Menu shortcut", "Atalho do menu", "Raccourci du menu", "Menü-Tastenkürzel", "Atajo del menú", "Scorciatoia del menu", "Клавиша меню"}},
+  {"pad-shortcut", {"Controller shortcut", "Atalho do controle", "Raccourci manette", "Controller-Tastenkürzel", "Atajo del mando", "Scorciatoia controller", "Комбинация геймпада"}},
++ {"ach-title", {"Achievements", "Conquistas", "Succès", "Erfolge", "Logros", "Obiettivi", "Достижения"}},
++ {"ach-toast", {"Achievement unlocked", "Conquista desbloqueada", "Succès déverrouillé", "Erfolg freigeschaltet", "Logro desbloqueado", "Obiettivo sbloccato", "Достижение получено"}},
++ {"ach-count-label", {"Unlocked", "Desbloqueadas", "Déverrouillés", "Freigeschaltet", "Desbloqueados", "Sbloccati", "Получено"}},
++ {"ach-score-label", {"Gamerscore", "Pontuação", "Score", "Gamerscore", "Puntuación", "Punteggio", "Очки"}},
++ {"ach-filter-all", {"All", "Todas", "Tous", "Alle", "Todos", "Tutti", "Все"}},
++ {"ach-filter-unlocked", {"Unlocked", "Desbloqueadas", "Déverrouillés", "Freigeschaltet", "Desbloqueados", "Sbloccati", "Полученные"}},
++ {"ach-filter-locked", {"Locked", "Bloqueadas", "Verrouillés", "Gesperrt", "Bloqueados", "Bloccati", "Не полученные"}},
++ {"ach-sort-format", {"Sort: %s", "Ordem: %s", "Tri : %s", "Sortierung: %s", "Orden: %s", "Ordine: %s", "Сортировка: %s"}},
++ {"ach-sort-recent", {"Recent", "Recentes", "Récents", "Neueste", "Recientes", "Recenti", "Недавние"}},
++ {"ach-sort-game", {"Game order", "Ordem do jogo", "Ordre du jeu", "Spielreihenfolge", "Orden del juego", "Ordine del gioco", "Порядок игры"}},
++ {"ach-sort-score", {"Gamerscore", "Pontuação", "Score", "Gamerscore", "Puntuación", "Punteggio", "Очки"}},
++ {"ach-sort-name", {"Name", "Nome", "Nom", "Name", "Nombre", "Nome", "Название"}},
++ {"ach-state-unlocked", {"Unlocked", "Desbloqueada", "Déverrouillé", "Freigeschaltet", "Desbloqueado", "Sbloccato", "Получено"}},
++ {"ach-state-locked", {"Locked", "Bloqueada", "Verrouillé", "Gesperrt", "Bloqueado", "Bloccato", "Не получено"}},
++ {"ach-secret", {"Secret achievement", "Conquista secreta", "Succès secret", "Geheimer Erfolg", "Logro secreto", "Obiettivo segreto", "Секретное достижение"}},
++ {"ach-secret-text", {"Keep playing to unlock this secret achievement.", "Continue jogando para desbloquear esta conquista secreta.", "Continuez à jouer pour déverrouiller ce succès secret.", "Spiele weiter, um diesen geheimen Erfolg freizuschalten.", "Sigue jugando para desbloquear este logro secreto.", "Continua a giocare per sbloccare questo obiettivo segreto.", "Продолжайте играть, чтобы получить это секретное достижение."}},
++ {"ach-unlocked-on", {"Unlocked %s", "Desbloqueada em %s", "Déverrouillé le %s", "Freigeschaltet am %s", "Desbloqueado el %s", "Sbloccato il %s", "Получено %s"}},
++ {"ach-empty", {"No achievements here yet.", "Nenhuma conquista aqui ainda.", "Aucun succès ici pour l’instant.", "Hier gibt es noch keine Erfolge.", "Aún no hay logros aquí.", "Ancora nessun obiettivo qui.", "Здесь пока нет достижений."}},
++ {"ach-unavailable", {"Achievements are not available yet.", "As conquistas ainda não estão disponíveis.", "Les succès ne sont pas encore disponibles.", "Erfolge sind noch nicht verfügbar.", "Los logros aún no están disponibles.", "Gli obiettivi non sono ancora disponibili.", "Достижения пока недоступны."}},
++ {"ach-hint-browse", {"Browse", "Navegar", "Parcourir", "Blättern", "Navegar", "Scorri", "Листать"}},
++ {"ach-hint-filter", {"Filter", "Filtro", "Filtre", "Filter", "Filtro", "Filtro", "Фильтр"}},
++ {"ach-hint-sort", {"Sort", "Ordenar", "Trier", "Sortieren", "Ordenar", "Ordina", "Сортировка"}},
++ {"ach-hint-close", {"Close", "Fechar", "Fermer", "Schließen", "Cerrar", "Chiudi", "Закрыть"}},
+ };
+ }
+ const char* Text(std::string_view key) {
+@@ -132,7 +155,9 @@ const char* Text(std::string_view key) {
+   if (key == "settings") return Tr(TextId::TabSettings);
+   if (key == "ready") return Tr(TextId::StatusReady);
+   if (key == "dlc") return Tr(TextId::TabDlc);
+-  const size_t language = size_t(Localization::GetLanguage());
++  return TextIn(key, size_t(Localization::GetLanguage()));
++}
++const char* TextIn(std::string_view key, size_t language) {
+   for (const auto& entry : strings) if (key == entry.key) return entry.values[language < 7 ? language : 0];
+   return "";
+ }
+diff --git a/app/src/menu/text.h b/app/src/menu/text.h
+index 8d33bf7..6dba3fd 100644
+--- a/app/src/menu/text.h
++++ b/app/src/menu/text.h
+@@ -7,6 +7,9 @@
+ #include <string_view>
+ namespace narutorise::menu {
+ const char* Text(std::string_view key);
++// A string of the table in one language (Localization::Language order), whatever
++// the menus' language: the achievements speak the game's.
++const char* TextIn(std::string_view key, size_t language);
+ class TextSystem final : public Rml::SystemInterface {
+  public:
+   int TranslateString(Rml::String& translated, const Rml::String& input) override;
+diff --git a/app/src/menu/ui.cpp b/app/src/menu/ui.cpp
+index 7b02302..ea0f27c 100644
+--- a/app/src/menu/ui.cpp
++++ b/app/src/menu/ui.cpp
+@@ -141,6 +141,8 @@ void Ui::Shutdown() {
+   presenter_ = nullptr;
+   in_presenter_ = false;
+   HideOverlay();
++  achievements_.Shutdown();
++  toast_shown_ = false; achievements_shown_ = false;
+   if (status_) status_->RemoveEventListener("click", status_events_.get());
+   status_events_.reset(); status_ = nullptr;
+   status_shown_ = false; game_menu_enabled_ = false; toggle_menu_ = {};
+@@ -223,7 +225,8 @@ void Ui::EnableGameMenu(std::string key, std::string chord, std::function<void()
+   pad_.SetShortcut(std::move(chord), [this] { if ((!input_active_ || input_active_()) && toggle_menu_) toggle_menu_(); });
+ }
+ void Ui::ShowOverlay(std::function<void()> settings, std::function<void()> dlc,
+-                      std::function<void()> quit, std::function<void()> close) {
++                      std::function<void()> quit, std::function<void()> close,
++                      std::function<void()> achievements) {
+   controls::Hardware().StopAllRumble();
+   HideOverlay();
+   if (!context_) return;
+@@ -231,11 +234,16 @@ void Ui::ShowOverlay(std::function<void()> settings, std::function<void()> dlc,
+   overlay_ = context_->LoadDocument("overlay.rml");
+   if (!overlay_) return;
+   overlay_events_ = std::make_unique<MenuEvents>();
++  const bool with_achievements = bool(achievements);
+   overlay_events_->actions = {{"overlay-settings", std::move(settings)}, {"overlay-dlc", std::move(dlc)},
+-                             {"overlay-exit", std::move(quit)}, {"close", close}, {"overlay-close", std::move(close)}};
+-  for (const auto* id : {"overlay-settings", "overlay-dlc", "overlay-exit"}) {
++                             {"overlay-exit", std::move(quit)}, {"close", close}, {"overlay-close", std::move(close)},
++                             {"overlay-achievements", std::move(achievements)}};
++  if (auto* tab = overlay_->GetElementById("overlay-achievements"); tab && !with_achievements) tab->SetProperty("display", "none");
++  for (const auto* id : {"overlay-settings", "overlay-achievements", "overlay-dlc", "overlay-exit"}) {
+     auto* button = overlay_->GetElementById(id);
+-    const std::string label = Text(std::string(id) == "overlay-settings" ? "settings" : std::string(id) == "overlay-dlc" ? "dlc" : "exit-game");
++    const std::string name = id;
++    const std::string label = Text(name == "overlay-settings" ? "settings" : name == "overlay-achievements" ? "ach-title" :
++                                   name == "overlay-dlc" ? "dlc" : "exit-game");
+     button->SetInnerRML("<div class='tab-plate'/><span class='tab-label'>" + Rml::StringUtilities::EncodeRml(label) + "</span>");
+   }
+   overlay_->GetElementById("overlay-close-hint")->SetInnerRML(Text(gamepad_input_ ? "close-pad" : "close-key"));
+@@ -247,7 +255,7 @@ void Ui::ShowOverlay(std::function<void()> settings, std::function<void()> dlc,
+ }
+ void Ui::HideOverlay() {
+   if (!overlay_) return;
+-  HideDialog(); HidePanel(); CancelKeyCapture();
++  HideDialog(); HidePanel(); HideAchievements(); CancelKeyCapture();
+   for (const char* event : {"click", "keydown", "mouseover"}) overlay_->RemoveEventListener(event, overlay_events_.get());
+   overlay_->Close(); overlay_ = nullptr; overlay_events_.reset();
+   overlay_shown_ = false; UpdateDocuments();
+@@ -257,8 +265,33 @@ void Ui::UseGamepad(bool gamepad) {
+   gamepad_input_ = gamepad; panel_.SetGamepadHints(gamepad);
+   controls_.SetGamepadHints(gamepad);
+   setup_.SetGamepadHints(gamepad);
++  achievements_.SetGamepadHints(gamepad);
+   if (overlay_) overlay_->GetElementById("overlay-close-hint")->SetInnerRML(Text(gamepad ? "close-pad" : "close-key"));
+ }
++void Ui::PushAchievement(Achievement achievement) {
++  achievements_.Push(std::move(achievement));
++  toast_shown_ = true;  // The frames that play it.
++  UpdateDocuments();
++}
++bool Ui::ShowAchievements(std::string game, std::vector<Achievement> list, uint32_t focus, std::function<void()> close) {
++  if (!context_) return false;
++  controls::Hardware().StopAllRumble();
++  context_->ProcessMouseMove(-1, -1, 0);
++  if (!achievements_.ShowList(*context_, std::move(game), std::move(list), focus, std::move(close))) return false;
++  achievements_shown_ = true; toast_shown_ = achievements_.ToastActive();
++  ++view_revision_;
++  UpdateDocuments();
++  return true;
++}
++void Ui::HideAchievements() {
++  if (!achievements_.ListShown()) return;
++  achievements_.HideList();
++  achievements_shown_ = false; toast_shown_ = achievements_.ToastActive();
++  UpdateDocuments();
++}
++void Ui::SetGuide(std::function<void()> guide) {
++  pad_.SetGuide([this, guide = std::move(guide)] { if ((!input_active_ || input_active_()) && guide) guide(); });
++}
+ void Ui::Notify(std::string message, std::string action_label, std::function<void()> action, std::string title) {
+   notices_.push_back({std::move(message), std::move(action_label), std::move(action), std::move(title)}); UpdateStatus();
+ }
+@@ -368,7 +401,7 @@ void Ui::ShowDialog(const std::string& title, const std::string& message,
+ void Ui::UpdateDocuments() {
+   UpdateStatus();
+   if (overlay_) {
+-    const bool bar = !panel_.Shown() && !controls_.Shown() && !dialog_;
++    const bool bar = !panel_.Shown() && !controls_.Shown() && !dialog_ && !achievements_.ListShown();
+     if (bar && !overlay_->IsVisible()) {
+       overlay_->Show(Rml::ModalFlag::None, Rml::FocusFlag::Document);
+       if (auto* item = overlay_->GetElementById(overlay_events_->last_focus)) item->Focus();
+@@ -376,7 +409,8 @@ void Ui::UpdateDocuments() {
+   }
+   if (fps_) fps_->SetClass("menu-open", overlay_shown_.load());
+   if (fps_) {
+-    const bool fps = fps_visible_.load() && !setup_shown_.load() && !panel_.Shown() && !controls_.Shown() && !dialog_;
++    const bool fps = fps_visible_.load() && !setup_shown_.load() && !panel_.Shown() && !controls_.Shown() && !dialog_ &&
++                     !achievements_.ListShown();
+     if (fps && !fps_->IsVisible()) {
+       rate_frames_ = frames_.load(std::memory_order_relaxed);
+       rate_time_ = std::chrono::steady_clock::now();
+@@ -432,6 +466,7 @@ void Ui::Draw(rex::ui::UIDrawContext& context) {
+   if (status_events_ && status_events_->pending) {
+     auto action = std::exchange(status_events_->pending, {}); if (action) action();
+   }
++  if (auto action = achievements_.TakePending()) action();
+   if (key_capture_ && (!pending_key_.empty() || std::chrono::steady_clock::now() - capture_started_ > std::chrono::seconds(5))) {
+     auto captured = std::exchange(key_capture_, {});
+     captured(std::exchange(pending_key_, {}));
+@@ -450,6 +485,12 @@ void Ui::Draw(rex::ui::UIDrawContext& context) {
+   }
+   if (fps_ && fps_->IsVisible()) UpdateRate();
+   setup_.UpdateLogo(*render_);
++  {
++    const bool shown = Shown();
++    achievements_.Tick(*context_);
++    toast_shown_ = achievements_.ToastActive(); achievements_shown_ = achievements_.ListShown();
++    if (shown != Shown()) UpdateDocuments();
++  }
+   context_->Update();
+   if (panel_.RevealSelection()) context_->Update();
+   render_->Begin(context, width, height);
+diff --git a/app/src/menu/ui.h b/app/src/menu/ui.h
+index f0dd50d..e604fc8 100644
+--- a/app/src/menu/ui.h
++++ b/app/src/menu/ui.h
+@@ -10,6 +10,7 @@
+ #pragma once
+ 
+ #include "menu/setup_screen.h"
++#include "menu/achievements.h"
+ #include "menu/panel.h"
+ #include "menu/pad_input.h"
+ #include "menu/controls.h"
+@@ -22,6 +23,8 @@
+ #include <string>
+ #include <vector>
+ #include <deque>
++#include <filesystem>
++#include <optional>
+ #include <rex/ui/ui_drawer.h>
+ #include <rex/ui/window_listener.h>
+ 
+@@ -76,18 +79,32 @@ class Ui final : public rex::ui::UIDrawer, public rex::ui::WindowInputListener {
+   void EnableGameMenu(std::string key, std::string chord, std::function<void()> toggle);
+   bool GameMenuEnabled() const { return game_menu_enabled_.load(); }
+   void PollInput();
++  // achievements: the tab of the achievements list, hidden without it.
+   void ShowOverlay(std::function<void()> settings, std::function<void()> dlc,
+-                   std::function<void()> quit, std::function<void()> close);
++                   std::function<void()> quit, std::function<void()> close,
++                   std::function<void()> achievements = {});
+   void HideOverlay();
+   bool OverlayShown() const { return overlay_shown_.load(); }
+   void Notify(std::string message, std::string action_label = {}, std::function<void()> action = {}, std::string title = {});
+   void ShowShortcutHint(std::string message, std::chrono::milliseconds delay = {});
+   bool HintShown() const { return hint_shown_; }
+   void SetShadersVisible(bool visible, uint32_t pending = 0, float progress = -1);
++  // The achievements (menu/achievements.h), UI thread: the toast of an unlock,
++  // in the language given (the game's), and the list, over the overlay or alone.
++  void SetAchievementLanguage(size_t language) { achievements_.SetLanguage(language); }
++  void SetAchievementSound(std::filesystem::path path) { achievements_.SetSoundFile(std::move(path)); }
++  void PushAchievement(Achievement achievement);
++  bool ShowAchievements(std::string game, std::vector<Achievement> list, uint32_t focus, std::function<void()> close);
++  void HideAchievements();
++  bool AchievementsShown() const { return achievements_shown_.load(); }
++  // The achievement of the toast on screen, if one shows.
++  std::optional<uint32_t> AchievementToast() const { return achievements_.ToastId(); }
++  // A press of a controller's Guide button, while the window has the focus.
++  void SetGuide(std::function<void()> guide);
+   // A document is shown (any thread): the native mode draws frames then.
+   bool Shown() const { return fps_visible_.load() || setup_shown_.load() || panel_shown_.load() ||
+                               controls_shown_.load() || overlay_shown_.load() || status_shown_.load() ||
+-                              dialog_shown_.load(); }
++                              dialog_shown_.load() || toast_shown_.load() || achievements_shown_.load(); }
+   // A frame of the UI, on the UI thread: the app's call in the native mode,
+   // the presenter's with Xenos.
+   void Draw(rex::ui::UIDrawContext& context) override;
+@@ -103,7 +120,8 @@ class Ui final : public rex::ui::UIDrawer, public rex::ui::WindowInputListener {
+  private:
+   void UpdateDocuments();
+   void UpdateRate();
+-  bool TakesInput() const { return context_ && (setup_.Shown() || panel_.Shown() || controls_.Shown() || dialog_ || overlay_); }
++  bool TakesInput() const { return context_ && (setup_.Shown() || panel_.Shown() || controls_.Shown() || dialog_ || overlay_ ||
++                                                achievements_.ListShown()); }
+   struct MenuEvents;
+   std::unique_ptr<MenuEvents> overlay_events_, status_events_;
+   Rml::ElementDocument* overlay_ = nullptr;
+@@ -144,6 +162,8 @@ class Ui final : public rex::ui::UIDrawer, public rex::ui::WindowInputListener {
+   Panel panel_;
+   Controls controls_;
+   std::atomic<bool> controls_shown_{false};
++  Achievements achievements_;
++  std::atomic<bool> toast_shown_{false}, achievements_shown_{false};
+   PadInput pad_;
+   TextSystem text_;
+   std::atomic<bool> panel_shown_{false};
+diff --git a/app/src/narutorise_app.h b/app/src/narutorise_app.h
+index 3210af7..9d3e2ae 100644
+--- a/app/src/narutorise_app.h
++++ b/app/src/narutorise_app.h
+@@ -4,6 +4,7 @@
+ 
+ #pragma once
+ 
++#include <algorithm>
+ #include <array>
+ #include <atomic>
+ #include <chrono>
+@@ -15,6 +16,7 @@
+ #include <limits>
+ #include <optional>
+ #include <stdexcept>
++#include <thread>
+ #include <utility>
+ #include <fmt/format.h>
+ #include <toml++/toml.hpp>
+@@ -27,6 +29,10 @@
+ #include <rex/system.h>
+ #include <rex/system/xam/content_manager.h>
+ #include <rex/system/xcontent.h>
++#include <rex/system/achievement_manager.h>
++#include <rex/system/kernel_state.h>
++#include <rex/system/util/xdbf_utils.h>
++#include <rex/ui/overlay/achievement_notification.h>
+ #include <rex/ui/keybinds.h>
+ #include <rex/ui/overlay/debug_overlay.h>
+ #include <rex/ui/presenter.h>
+@@ -51,6 +57,8 @@
+ #include "menu/shortcut.h"
+ #include "menu/update_checker.h"
+ #include "menu/ui.h"
++#include "menu/achievement_art.h"
++#include "menu/home_button.h"
+ #include "mods/translation_mod.h"
+ #include "ultrawide.h"
+ #include "window_title.h"
+@@ -438,6 +446,7 @@ class NarutoriseApp : public rex::ReXApp {
+     RestoreXenosAdapter();  // The provider exists by now.
+     SeedShaderStorage();
+     AutoInstallDlc();
++    SetupAchievements();
+ 
+     // Guest frame rate (measured per guest swap by the command processor) for
+     // the SDK debug overlay (F3).
+@@ -529,9 +538,19 @@ class NarutoriseApp : public rex::ReXApp {
+     gpu::ui::UiLayer().SetFrameRequest({});  // No Swap asks for a UI frame from here on.
+     gpu::ui::UiLayer().SetFirstPresentCallback({});
+ #endif
++    if (achievement_listener_ && runtime() && runtime()->kernel_state())
++      achievements().UnregisterCallback(achievement_listener_);
++    achievement_listener_ = 0;
++    narutorise::menu::achievement_art::SetIconSource({});
+     ui_.Shutdown();
+   }
+ 
++  // The achievement toasts and list are the native menus' (SetupAchievements),
++  // in both renderers: the SDK's ImGui toast would repeat them with Xenos.
++  std::unique_ptr<rex::ui::AchievementNotificationDialog> CreateAchievementNotificationDialog() override {
++    return nullptr;
++  }
++
+   void OnClosing(rex::ui::UIEvent& event) override {
+     // The SDK uses _Exit here, so destructors and OnShutdown cannot flush it.
+     narutorise::reporting::Close();
+@@ -540,6 +559,162 @@ class NarutoriseApp : public rex::ReXApp {
+   }
+ 
+  private:
++  // The achievements (menu/achievements.h). The game unlocks them through
++  // XGIUserWriteAchievements and the SDK's AchievementManager keeps them
++  // (user/achievements/<title>.toml); this shows a toast for each new one, and
++  // the list from the game menu or the Guide button. The names, descriptions
++  // and icons are the title's (its XDBF), in the game's language, and so are
++  // the words around them.
++  void SetupAchievements() {
++    auto* kernel = runtime() ? runtime()->kernel_state() : nullptr;
++    if (!kernel || achievement_listener_) return;
++    const auto title = kernel->title_xdbf();
++    const auto language = title.is_valid() ? title.GetExistingLanguage(rex::system::XLanguage(GameLanguage()))
++                                           : rex::system::XLanguage::kEnglish;
++    ui_.SetAchievementLanguage(MenuLanguageOf(language));
++    achievement_game_ = "Naruto: Rise of a Ninja";  // The title's XDBF capitalizes every word.
++    narutorise::menu::achievement_art::SetIconSource([this](uint32_t image_id) {
++      std::vector<uint8_t> png;
++      auto* kernel = runtime() ? runtime()->kernel_state() : nullptr;
++      if (!kernel || !image_id) return png;
++      const auto title = kernel->title_xdbf();
++      if (!title.is_valid()) return png;
++      const auto block = title.GetEntry(rex::system::util::XdbfSection::kImage, uint64_t(image_id));
++      if (block) png.assign(block.buffer, block.buffer + block.size);
++      return png;
++    });
++    // The orb and the sound are local files of the user's build, never shipped (tools/build.py).
++    const auto assets = AchievementAssets();
++    narutorise::menu::achievement_art::SetOrbFile(assets.empty() ? std::filesystem::path{} : assets / "orb.png");
++    ui_.SetAchievementSound(assets.empty() ? std::filesystem::path{} : assets / "unlock.wav");
++    // A guest thread reports the unlock: the toast is the UI thread's.
++    achievement_listener_ = achievements().RegisterNotificationCallback([this](const rex::system::AchievementEvent& event) {
++      auto card = AchievementCard(event.achievement, true, event.unlocked_at_filetime);
++      app_context().CallInUIThread([this, card = std::move(card)]() mutable {
++        if (!closing_.load()) ui_.PushAchievement(std::move(card));
++      });
++    });
++    if (NativeRenderer()) ui_.SetGuide([this] { narutorise::menu::NoteHomePress(); ToggleAchievements(); });
++    const auto list = AchievementList();
++    const auto unlocked = std::count_if(list.begin(), list.end(), [](const auto& a) { return a.unlocked; });
++    const auto secret = std::count_if(list.begin(), list.end(), [](const auto& a) { return a.secret; });
++    REXLOG_INFO("[narutorise] Achievements: {} in {} ({} unlocked, {} secret), language {}, assets {}", list.size(),
++                achievement_game_, unlocked, secret, int(language), assets.empty() ? "none" : assets.string());
++    PreviewAchievements();
++  }
++  static uint32_t GameLanguage() {
++    const std::string value = rex::cvar::GetFlagByName("user_language");
++    char* end = nullptr;
++    const unsigned long language = std::strtoul(value.c_str(), &end, 10);
++    return end != value.c_str() && language ? uint32_t(language) : 1u;
++  }
++  // The game's language as the menus' tables order them (Localization::Language).
++  static size_t MenuLanguageOf(rex::system::XLanguage language) {
++    using rex::system::XLanguage;
++    switch (language) {
++      case XLanguage::kPortuguese: return 1;
++      case XLanguage::kFrench: return 2;
++      case XLanguage::kGerman: return 3;
++      case XLanguage::kSpanish: return 4;
++      case XLanguage::kItalian: return 5;
++      case XLanguage::kRussian: return 6;
++      default: return 0;
++    }
++  }
++  // achievements/ beside the executable, or in Resources of the macOS bundle.
++  static std::filesystem::path AchievementAssets() {
++    const auto executable = rex::filesystem::GetExecutableFolder();
++    for (const auto& folder : {executable / "achievements", executable.parent_path() / "Resources" / "achievements"}) {
++      std::error_code ec;
++      if (std::filesystem::is_directory(folder, ec)) return folder;
++    }
++    return {};
++  }
++  static narutorise::menu::Achievement AchievementCard(const rex::system::AchievementInfo& info, bool unlocked,
++                                                       uint64_t time) {
++    narutorise::menu::Achievement card;
++    card.id = info.id;
++    card.image_id = info.image_id;
++    card.gamerscore = info.gamerscore;
++    card.name = info.label;
++    card.description = info.description;
++    card.locked_description = info.unachieved_description;
++    card.secret = (info.flags & 0x8) == 0;  // XDBF: 0x8 shows it while locked.
++    card.unlocked = unlocked;
++    card.unlock_time = time;
++    return card;
++  }
++  std::vector<narutorise::menu::Achievement> AchievementList() {
++    std::vector<narutorise::menu::Achievement> list;
++    if (!runtime() || !runtime()->kernel_state()) return list;
++    auto& manager = achievements();
++    for (const auto& info : manager.ListAchievements())
++      list.push_back(AchievementCard(info, manager.IsUnlocked(info.id), manager.GetUnlockTime(info.id)));
++    return list;
++  }
++  // The Guide button: the list, focused on the toast's achievement while one
++  // shows, as on the console; again, or B, closes it.
++  void ToggleAchievements() {
++    if (ui_.AchievementsShown()) CloseAchievements();
++    else OpenAchievements();
++  }
++  void OpenAchievements() {
++    if (!NativeRenderer() || !game_running_ || ui_.PanelShown() || ui_.AchievementsShown()) return;
++    auto list = AchievementList();
++    if (list.empty()) {
++      ui_.Notify(narutorise::menu::Text("ach-unavailable"));
++      return;
++    }
++    const uint32_t focus = ui_.AchievementToast().value_or(0);
++    if (!ui_.ShowAchievements(achievement_game_, std::move(list), focus, [this] { CloseAchievements(); })) return;
++    narutorise::menu::input_blocked = true;
++    REXLOG_INFO("[narutorise] Achievements list opened; guest input neutral");
++  }
++  void CloseAchievements() {
++    ui_.HideAchievements();
++    narutorise::menu::input_blocked = ui_.OverlayShown();
++    if (!ui_.Shown()) DrawNativeUi();  // Replace the persistent GPU frame when nothing remains.
++  }
++  // NARUTORISE_ACHIEVEMENT_PREVIEW, for checking the presentation, after
++  // NARUTORISE_ACHIEVEMENT_PREVIEW_DELAY seconds (default 15): achievement ids
++  // (comma separated) or "all" show their toasts without unlocking anything;
++  // "list" opens the list, "menu" the game menu and "home" does what a press of
++  // the Home button does. "unlock" really unlocks
++  // the first locked achievement through the SDK, as the game would: use it on
++  // a copy of the data folder only.
++  void PreviewAchievements() {
++    const char* preview = std::getenv("NARUTORISE_ACHIEVEMENT_PREVIEW");
++    if (!preview || !*preview) return;
++    const char* delay_text = std::getenv("NARUTORISE_ACHIEVEMENT_PREVIEW_DELAY");
++    const int delay = delay_text ? std::atoi(delay_text) : 15;
++    std::thread([this, request = std::string(preview), delay] {
++      std::this_thread::sleep_for(std::chrono::seconds(std::max(0, delay)));
++      app_context().CallInUIThread([this, request] {
++        if (closing_.load()) return;
++        const auto list = AchievementList();
++        for (size_t start = 0; start <= request.size();) {
++          const size_t comma = std::min(request.find(',', start), request.size());
++          const std::string token = request.substr(start, comma - start);
++          start = comma + 1;
++          if (token == "list") OpenAchievements();
++          if (token == "menu") OpenGameMenu();
++          if (token == "home") {  // A press of the Home button, as the game takes it.
++            narutorise::menu::NoteHomePress();
++            ToggleAchievements();
++          }
++          if (token == "unlock") {
++            const auto locked = std::find_if(list.begin(), list.end(), [](const auto& a) { return !a.unlocked; });
++            if (locked != list.end())
++              achievements().UnlockAchievement(locked->id, rex::system::AchievementNotification::kShow);
++          }
++          for (const auto& card : list)
++            if (token == "all" || token == std::to_string(card.id)) ui_.PushAchievement(card);
++        }
++        REXLOG_INFO("[narutorise] Achievement preview: {}", request);
++      });
++    }).detach();
++  }
++
+   bool FailDataBootstrap(const std::string& error) {
+     std::string message = "Could not prepare the data folder.\n" + error;
+     // The selected root may be locked, read-only or not resolved at all.
+@@ -1291,12 +1466,14 @@ class NarutoriseApp : public rex::ReXApp {
+   }
+   void OpenGameMenu() {
+     if (!NativeRenderer() || !game_running_) return;
++    // The menu takes the place of a list the Guide button opened, and its keyboard.
++    if (ui_.AchievementsShown()) CloseAchievements();
+     ui_.ShowOverlay([this] { OpenSettings(); }, [this] { OpenDlc(); }, [this] {
+       using narutorise::menu::Text;
+       ui_.ShowDialog(std::string(Text("exit-game")) + "?", Text("exit-confirm"), {
+           {Text("exit-game"), [this] { RequestExit(); }},
+           {Text("cancel"), {}}});
+-    }, [this] { CloseGameMenu(); });
++    }, [this] { CloseGameMenu(); }, [this] { OpenAchievements(); });
+     narutorise::menu::input_blocked = ui_.OverlayShown();
+     REXLOG_INFO("[narutorise] Game menu opened; guest input neutral");
+   }
+@@ -1338,6 +1515,8 @@ class NarutoriseApp : public rex::ReXApp {
+       shortcut_hint_pending_ = false; ui_.ShowShortcutHint(shortcut_hint_);
+     }
+     if (game_running_) {
++      // The Guide button opens the achievements, not the system's Games app.
++      narutorise::menu::ClaimHomeButton();
+       const auto progress = gpu::CurrentShaderProgress();
+       ui_.SetShadersVisible(menu_settings_.menu_options().shaders && gpu::ShaderCompilationVisible(), progress.pending, progress.fraction);
+     }
+@@ -1494,6 +1673,8 @@ class NarutoriseApp : public rex::ReXApp {
+ #endif
+   FullscreenShortcuts fullscreen_shortcuts_;
+   std::unique_ptr<rex::ui::ImmediateDrawer> native_drawer_;  // Before ui_: it outlives the Ui.
++  rex::system::AchievementListenerHandle achievement_listener_ = 0;
++  std::string achievement_game_;
+   narutorise::menu::Ui ui_;
+   narutorise::menu::Settings menu_settings_;
+   narutorise::menu::Dlc menu_dlc_;
+diff --git a/app/ui/achievement_toast.rcss b/app/ui/achievement_toast.rcss
+new file mode 100644
+index 0000000..83017cd
+--- /dev/null
++++ b/app/ui/achievement_toast.rcss
+@@ -0,0 +1,23 @@
++/* The achievement toast, after the Xbox 360 one: a medal pops in at the
++   bottom center, opens into a pill with the name and the gamerscore, closes
++   and spins away. Achievements::Toast drives every moving property per frame;
++   the images are made at their pixel size (achievement_art.h). */
++body { position: absolute; width: 100%; height: 100%; pointer-events: none; z-index: 90; }
++#lane { position: absolute; left: 0; right: 0; bottom: 58.667dp; height: 64dp; }
++#toast { position: absolute; left: 50%; top: 0; width: 64dp; height: 64dp; margin-left: -32dp; }
++#pill { position: absolute; left: 0; top: 0; width: 100%; height: 64dp; box-sizing: border-box; border: 2.667dp #4c4846; border-radius: 32dp; decorator: vertical-gradient(#3e3a38f5 #1a1817f5); }
++#gloss { position: absolute; left: 30dp; right: 30dp; top: 2.667dp; height: 21.333dp; border-radius: 10.667dp; background-color: #ffffff0e; }
++#shine { position: absolute; left: 64dp; top: 0; width: 96dp; height: 58.667dp; opacity: 0; }
++#words { position: absolute; left: 78dp; top: 11.333dp; white-space: nowrap; opacity: 0; }
++#toast-title { display: block; font-family: "Roboto Condensed"; font-size: 15.333dp; color: #d4d4d4; font-effect: shadow(0dp 1.333dp #000000c0); }
++#toast-name { display: block; margin-top: 0.667dp; font-family: "Roboto Condensed"; font-size: 19.333dp; font-weight: bold; color: #ffffff; font-effect: shadow(0dp 1.333dp #000000d0); }
++#toast-name span { display: inline; }
++.g { color: #a8da5c; }
++#toast-icon { position: absolute; right: 11.333dp; top: 10dp; width: 44dp; height: 44dp; opacity: 0; }
++#icon-frame { position: absolute; right: 10dp; top: 8.667dp; width: 46.667dp; height: 46.667dp; box-sizing: border-box; border: 1.333dp #ffffff2e; border-radius: 7.333dp; opacity: 0; }
++#medal { position: absolute; left: 0; top: 0; width: 64dp; height: 64dp; opacity: 0; }
++#glow { position: absolute; left: -43dp; top: -43dp; width: 150dp; height: 150dp; opacity: 0; }
++#ring { position: absolute; left: 0; top: 0; width: 64dp; height: 64dp; box-sizing: border-box; border: 2.667dp #605b57; border-radius: 32dp; background-color: #0b0b0bf2; }
++#lights { position: absolute; left: 0; top: 0; width: 64dp; height: 64dp; opacity: 0; }
++#orb, #trophy { position: absolute; left: 9.333dp; top: 9.333dp; width: 45.333dp; height: 45.333dp; }
++#trophy { opacity: 0; }
+diff --git a/app/ui/achievement_toast.rml b/app/ui/achievement_toast.rml
+new file mode 100644
+index 0000000..52000cb
+--- /dev/null
++++ b/app/ui/achievement_toast.rml
+@@ -0,0 +1,2 @@
++<rml><head><title>Achievement unlocked</title><link type="text/rcss" href="theme.rcss"/><link type="text/rcss" href="achievement_toast.rcss"/></head>
++<body><div id="lane"><div id="toast"><div id="pill"><div id="gloss"/><img id="shine"/></div><div id="words"><span id="toast-title"/><span id="toast-name"/></div><img id="toast-icon"/><div id="icon-frame"/><div id="medal"><img id="glow"/><div id="ring"/><img id="lights"/><img id="orb"/><img id="trophy"/></div></div></div></body></rml>
+diff --git a/app/ui/achievements.rcss b/app/ui/achievements.rcss
+new file mode 100644
+index 0000000..35f2dc6
+--- /dev/null
++++ b/app/ui/achievements.rcss
+@@ -0,0 +1,78 @@
++/* The achievements of the game, after the Xbox 360 guide: progress and
++   gamerscore on top, the list on the left, the selected achievement on the
++   right. Charcoal and the green of the toast; plain triangles, vertex
++   gradients and pre-sized images only (render_interface.h). */
++body { position: absolute; width: 100%; height: 100%; z-index: 80; }
++#veil { opacity: 0; position: absolute; left: 0; top: 0; width: 100%; height: 100%; background-color: #000000a8; }
++#sheet { opacity: 0; position: absolute; left: 50%; top: 50%; width: 920dp; height: 584dp; margin-left: -460dp; margin-top: -292dp; box-sizing: border-box; border: 1.333dp #4b4b4b; border-radius: 14dp; decorator: vertical-gradient(#2c2c2cfa #131313fa); }
++#head { position: absolute; left: 0; top: 0; right: 0; height: 96dp; border-bottom: 2dp #8dc63f; }
++#head-lights { position: absolute; left: 14dp; top: 10dp; width: 76dp; height: 76dp; }
++#head-orb { position: absolute; left: 24dp; top: 20dp; width: 56dp; height: 56dp; }
++#head-title { position: absolute; left: 102dp; top: 17.333dp; font-size: 30.667dp; font-weight: bold; letter-spacing: 1.333dp; text-transform: uppercase; color: #ffffff; white-space: nowrap; }
++#head-game { position: absolute; left: 103dp; top: 56dp; font-family: Roboto; font-size: 15.333dp; color: #a3a3a3; white-space: nowrap; }
++#stats { position: absolute; right: 66dp; top: 14dp; width: 340dp; height: 68dp; }
++.stat { position: absolute; top: 0; text-align: right; }
++#stat-count { right: 176dp; }
++#stat-score { right: 0; }
++.stat-value { display: block; font-size: 27.333dp; font-weight: bold; color: #ffffff; white-space: nowrap; }
++.stat-value .of { font-size: 18.667dp; font-weight: normal; color: #8c8c8c; }
++.stat-label { display: block; margin-top: -1.333dp; font-family: Roboto; font-size: 12dp; letter-spacing: 1dp; text-transform: uppercase; color: #9b9b9b; white-space: nowrap; }
++#progress { position: absolute; left: 0; right: 0; bottom: 2dp; height: 6dp; border-radius: 3dp; background-color: #ffffff1c; }
++#progress-fill { position: absolute; left: 0; top: 0; width: 0; height: 6dp; border-radius: 3dp; decorator: horizontal-gradient(#5e9b20 #b2e566); }
++button { border-width: 0; padding: 0; background-color: transparent; }
++#sheet-close { position: absolute; right: 20dp; top: 34dp; width: 28dp; height: 28dp; }
++.cross-one, .cross-two { position: absolute; left: 4dp; top: 13dp; width: 20dp; height: 1.333dp; background-color: #9b9b9b; transform: rotate(45deg); }
++.cross-two { transform: rotate(-45deg); }
++#sheet-close:hover .cross-one, #sheet-close:hover .cross-two { background-color: #8dc63f; }
++#filters { position: absolute; left: 20dp; top: 112dp; height: 30.667dp; white-space: nowrap; }
++.filter { display: inline-block; height: 30.667dp; line-height: 30.667dp; padding: 0 14dp; margin-right: 8dp; border-radius: 15.333dp; background-color: #ffffff12; font-size: 15.333dp; font-weight: bold; letter-spacing: 0.667dp; text-transform: uppercase; color: #b8b8b8; }
++.filter .n { font-weight: normal; color: #7c7c7c; }
++.filter:hover { background-color: #ffffff22; }
++.filter.selected { background-color: #8dc63f; color: #11180a; }
++.filter.selected .n { color: #34501a; }
++#sort { position: absolute; right: 22dp; bottom: 13.333dp; line-height: 24dp; font-family: Roboto; font-size: 14dp; color: #9b9b9b; white-space: nowrap; }
++#list { position: absolute; left: 20dp; top: 154dp; width: 492dp; bottom: 50dp; overflow-y: auto; overflow-x: hidden; }
++scrollbarvertical { width: 5.333dp; border-radius: 2.667dp; background-color: #ffffff0c; }
++scrollbarvertical slidertrack { width: 5.333dp; background-color: transparent; }
++scrollbarvertical sliderbar { width: 5.333dp; min-height: 24dp; border-radius: 2.667dp; background-color: #8dc63f99; }
++.row { display: block; position: relative; height: 62dp; margin-right: 10dp; margin-bottom: 4dp; border-radius: 8dp; background-color: #ffffff0a; }
++.row:hover { background-color: #ffffff14; }
++.row.selected { background-color: transparent; decorator: horizontal-gradient(#8dc63f4c #8dc63f0c); }
++.mark { position: absolute; left: 0; top: 12dp; width: 3.333dp; height: 38dp; border-radius: 1.667dp; }
++.row.selected .mark { background-color: #8dc63f; }
++.row-icon { position: absolute; left: 8dp; top: 7dp; width: 48dp; height: 48dp; }
++.row-name { position: absolute; left: 68dp; right: 76dp; top: 9.333dp; height: 22.667dp; overflow: hidden; white-space: nowrap; font-size: 17.333dp; font-weight: bold; color: #f4f4f4; }
++.row-sub { position: absolute; left: 68dp; right: 76dp; top: 33.333dp; height: 18.667dp; overflow: hidden; white-space: nowrap; font-family: Roboto; font-size: 13.333dp; color: #9e9e9e; }
++.row-score { position: absolute; right: 10dp; top: 18dp; height: 26dp; line-height: 26dp; width: 58dp; text-align: center; border-radius: 13dp; background-color: #0000005c; font-size: 15.333dp; font-weight: bold; color: #a8da5c; }
++.row.locked .row-name { color: #c2c2c2; }
++.row.locked .row-score { color: #8e8e8e; }
++.empty { display: block; margin-top: 40dp; text-align: center; font-family: Roboto; font-size: 16dp; color: #8e8e8e; }
++#detail { position: absolute; left: 528dp; top: 112dp; right: 20dp; bottom: 50dp; box-sizing: border-box; border: 1.333dp #ffffff12; border-radius: 10dp; background-color: #ffffff07; }
++#detail-art { position: absolute; left: 50%; top: 22dp; width: 156dp; height: 156dp; margin-left: -78dp; }
++#detail-glow { position: absolute; left: -62dp; top: -62dp; width: 280dp; height: 280dp; }
++#detail.locked #detail-glow { display: none; }
++#detail-icon { position: absolute; left: 0; top: 0; width: 156dp; height: 156dp; }
++#detail-frame { position: absolute; left: -2.667dp; top: -2.667dp; width: 161.333dp; height: 161.333dp; box-sizing: border-box; border: 2dp #8dc63f; border-radius: 24dp; }
++#detail.locked #detail-frame { border-color: #ffffff24; }
++#detail-lock { display: none; position: absolute; right: -16dp; bottom: -16dp; width: 54.667dp; height: 54.667dp; }
++#detail.locked #detail-lock { display: block; }
++#detail.secret #detail-lock { display: none; }
++#detail-body { position: absolute; left: 22dp; right: 22dp; top: 196dp; bottom: 14dp; overflow-y: auto; overflow-x: hidden; text-align: center; }
++#detail-name { display: block; font-size: 23.333dp; line-height: 27dp; font-weight: bold; color: #ffffff; }
++#detail-badges { display: block; margin-top: 10dp; }
++.badge { display: inline-block; height: 24dp; line-height: 24dp; padding: 0 10dp; margin: 0 3dp; border-radius: 12dp; font-size: 14dp; font-weight: bold; letter-spacing: 0.667dp; text-transform: uppercase; }
++#detail-score { background-color: #8dc63f; color: #11180a; }
++#detail-state { background-color: #8dc63f24; color: #c6e89a; }
++#detail.locked #detail-score { background-color: #3b3b3b; color: #d0d0d0; }
++#detail.locked #detail-state { background-color: #ffffff12; color: #b2b2b2; }
++#detail-text { display: block; margin-top: 14dp; font-family: Roboto; font-size: 15.333dp; line-height: 21.333dp; color: #d8d8d8; }
++#detail-date { display: block; margin-top: 12dp; font-family: Roboto; font-size: 13.333dp; color: #a8da5c; }
++#detail.locked #detail-date { color: #8e8e8e; }
++#hints { position: absolute; left: 22dp; bottom: 13.333dp; height: 24dp; white-space: nowrap; font-family: "Roboto Condensed"; font-size: 14.667dp; color: #a0a0a0; }
++.hint { display: inline-block; margin-right: 20dp; line-height: 24dp; }
++.cap, .btn { display: inline-block; height: 20dp; line-height: 20dp; margin-right: 5.333dp; box-sizing: border-box; text-align: center; vertical-align: middle; font-family: "Roboto Condensed"; font-weight: bold; }
++.cap { min-width: 22dp; padding: 0 5.333dp; border-radius: 4dp; background-color: #e6e6e6; font-size: 13.333dp; color: #161616; }
++.cap.dark { background-color: #3c3c3c; border: 1dp #6b6b6b; color: #f2f2f2; }
++.cap.bumper { border-radius: 9.333dp 9.333dp 3.333dp 3.333dp; }
++.btn { width: 20dp; border-radius: 10dp; font-size: 13.333dp; color: #ffffff; }
++.btn.a { background-color: #5ea52a; } .btn.b { background-color: #cc3a2f; } .btn.x { background-color: #2f6dd0; }
+diff --git a/app/ui/achievements.rml b/app/ui/achievements.rml
+new file mode 100644
+index 0000000..a8a0d25
+--- /dev/null
++++ b/app/ui/achievements.rml
+@@ -0,0 +1,2 @@
++<rml><head><title>Achievements</title><link type="text/rcss" href="theme.rcss"/><link type="text/rcss" href="achievements.rcss"/></head>
++<body><div id="veil"/><div id="sheet"><div id="head"><img id="head-lights"/><img id="head-orb"/><span id="head-title"/><span id="head-game"/><div id="stats"><div class="stat" id="stat-count"><span class="stat-value" id="count-value"/><span class="stat-label" id="count-label"/></div><div class="stat" id="stat-score"><span class="stat-value" id="score-value"/><span class="stat-label" id="score-label"/></div><div id="progress"><div id="progress-fill"/></div></div><button id="sheet-close"><span class="cross-one"/><span class="cross-two"/></button></div><div id="filters"/><span id="sort"/><div id="list"/><div id="detail"><div id="detail-art"><img id="detail-glow"/><img id="detail-icon"/><div id="detail-frame"/><img id="detail-lock"/></div><div id="detail-body"><span id="detail-name"/><div id="detail-badges"><span class="badge" id="detail-score"/><span class="badge" id="detail-state"/></div><span id="detail-text"/><span id="detail-date"/></div></div><span id="hints"/></div></body></rml>
+diff --git a/app/ui/overlay.rcss b/app/ui/overlay.rcss
+index c685370..e41b9d6 100644
+--- a/app/ui/overlay.rcss
++++ b/app/ui/overlay.rcss
+@@ -3,7 +3,7 @@ body { position: absolute; width: 100%; height: 100%; }
+ #bar-tabs { display: flex; position: absolute; left: 20dp; top: 10.667dp; }
+ button { border-width: 0; padding: 0; background-color: transparent; tab-index: auto; nav: horizontal; focus: auto; }
+ .tab { position: relative; display: block; height: 30.667dp; margin-right: 10.667dp; }
+-.settings { width: 160dp; } .dlc { width: 72dp; } .exit { width: 144dp; }
++.settings { width: 160dp; } .achievements { width: 136dp; } .dlc { width: 72dp; } .exit { width: 144dp; }
+ .tab-plate { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background-color: #1f2640; transform: skewX(-15deg); }
+ .tab-label { position: relative; display: block; line-height: 30.667dp; text-align: center; font-family: "Roboto Condensed"; font-size: 17.333dp; font-weight: bold; text-transform: uppercase; color: #9aa3b5; }
+ .tab:focus .tab-plate { background-color: #f2701f; } .tab:focus .tab-label { color: #0e1220; }
+diff --git a/app/ui/overlay.rml b/app/ui/overlay.rml
+index 44f30a4..5f110d2 100644
+--- a/app/ui/overlay.rml
++++ b/app/ui/overlay.rml
+@@ -1,2 +1,2 @@
+ <rml><head><title>Game menu</title><link type="text/rcss" href="theme.rcss"/><link type="text/rcss" href="overlay.rcss"/></head>
+-<body><div id="bar"><div id="bar-tabs"><button class="tab settings" id="overlay-settings"/><button class="tab dlc" id="overlay-dlc"/><button class="tab exit" id="overlay-exit"/></div><span id="overlay-close-hint"/><button id="overlay-close"><span class="cross-one"/><span class="cross-two"/></button></div></body></rml>
++<body><div id="bar"><div id="bar-tabs"><button class="tab settings" id="overlay-settings"/><button class="tab achievements" id="overlay-achievements"/><button class="tab dlc" id="overlay-dlc"/><button class="tab exit" id="overlay-exit"/></div><span id="overlay-close-hint"/><button id="overlay-close"><span class="cross-one"/><span class="cross-two"/></button></div></body></rml>
+-- 
+2.50.1 (Apple Git-155)
+

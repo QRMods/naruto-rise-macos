@@ -19,3 +19,6 @@ evidence/
 
 # Game artwork (copyrighted): kept local, never published.
 narutorise-icon.jpg
+
+# The achievement toast's orb and sound: local to whoever builds (tools/build.py).
+macos/assets/

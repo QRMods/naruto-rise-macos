@@ -39,6 +39,7 @@ version is [README.md](README.md).
 | Build command | `./Build.command` (same as `python3 tools/build.py`). Options: `--iso PATH`, `--jobs N` (default 6). |
 | Build result | `dist/Naruto Rise of a Ninja.app`. The last output line is `Application: <path>`. |
 | Play command | `./Play.command`, or open the app. |
+| Achievement orb and sound | Optional. Not in the repository and not downloadable here: only if the user already has them, they go in `macos/assets/` as `achievement-orb.png` and `achievement-unlocked.mp3` before building. Without them the toast is plain and silent. |
 | User data | `user/`: saves, `narutorise.toml` (settings), `cache/`, `logs/` (one log per session, `narutorise_NNN.log`), `incidents/` (why a session ended). |
 
 The build, in order: clones the source projects into `upstream/` at the commits in

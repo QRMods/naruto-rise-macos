@@ -142,6 +142,25 @@ set `show_startup_menu = true` in `user/narutorise.toml`.
 
 A controller that works with SDL (Xbox, PlayStation and most others) works too. You can
 change the keys in the game's menu (F1), or in `user/narutorise.toml` (the `keybind_*` lines).
+The controller's Guide button opens the achievements list (below).
+
+## Achievements
+
+The game's 32 achievements unlock as on the console. Each new one shows a toast at the
+bottom of the screen, after the Xbox 360 one: a medal pops in, opens into a bar with
+**Achievement unlocked**, the gamerscore, the name and the achievement's own icon, and
+spins away, with the unlock sound. Unlocks are kept in `user/achievements/555307E5.toml`.
+
+To see them all, open **Achievements** in the game's menu (F1), or press the controller's
+Guide button, also while a toast shows, as on the console. The list shows your progress
+and gamerscore, and each achievement's icon, description and unlock date. Filter with
+LB/RB (keys ‹ ›), sort with X (S), close with B (Esc). Secret achievements stay hidden
+until you unlock them. The texts follow the game's language (`user_language`).
+
+The Xbox orb in the toast and the unlock sound aren't part of this project. To have them,
+put `achievement-orb.png` and `achievement-unlocked.mp3` (or `.wav` or `.m4a`) in
+`macos/assets/` before building. Without them the toast shows a plain silver orb and
+makes no sound.
 
 ## Settings
 
@@ -159,7 +178,8 @@ Most of them can also be changed in the game's menu (F1).
 | `frame_rate` | `30` (default) keeps the open world at 30 FPS like the console. Fights always run at 60. From `60` to `240`, extra frames are interpolated, but on an M4 the village only reaches about 40. |
 | `msaa_samples` | Anti-aliasing: `0` is the game's own 4×; also `2`, `4` or `8`. |
 | `internal_resolution_scale` | `1.5` renders at 1920×1080; `0` uses `resolution_scale`. |
-| `fullscreen`, `vsync` | `true` or `false`. |
+| `fullscreen` | `true` (default on macOS): the whole screen, where macOS applies Game Mode. `false`: a window. Option+Return or F11 (fn+F11) switch while playing. |
+| `vsync` | `true` or `false`. |
 | `brightness` | `0.5` is the game's brightness. |
 
 To see the FPS in the window title, start the game from Terminal, inside the project
@@ -250,12 +270,14 @@ The macOS-specific parts are in `macos/`:
   3. The frame-rate and slow-frame (`[native-hitch]`) lines in the log, for `tools/`.
   4. The pipeline cache kept across sessions (below).
   5. A quick close on Cmd+Q (below).
+  6. Achievement toasts and the achievements list (below).
+  7. The game in the process macOS launched, which macOS knows as the app (below).
 - `patches/sdk/`: SDK patches applied after the PC port's: the PS5 port's (16 KB page
   write watches, Vulkan submission and frame pacing), adapted to follow them, guest
   module loading, the Vulkan presenter, and `std::atomic<std::shared_ptr>` where libc++
   lacks it.
-- `narutorise.toml`: the macOS defaults over the PC port's (keyboard and mouse, a
-  window, 30 FPS, straight into the game, no shader notice).
+- `narutorise.toml`: the macOS defaults over the PC port's (keyboard and mouse,
+  full screen, 30 FPS, straight into the game, no shader notice).
 
 ### New shaders without stutter
 
@@ -270,6 +292,42 @@ which costs tens to hundreds of milliseconds on a Mac. On macOS:
   the D3D12 backend does. `REX_NATIVE_PSO_ASYNC=prefetch` brings back the PC port's wait.
 - Compiled pipelines are saved in `user/cache/native-vulkan-pipelines.bin` and reused in
   later sessions.
+
+### Achievements
+
+The SDK keeps the achievements: the game reports them (`XGIUserWriteAchievements`), the
+`AchievementManager` saves them. Its toast, though, is an ImGui dialog of the Xenos
+presenter, so with the native renderer an unlock was saved and never shown. Patch 6
+shows them in the menus' RmlUi instead: the toast, the list, the Guide button (which
+reaches the menus even while the game doesn't receive it) and the game menu's tab. The
+names, descriptions and icons come from the game's own data (its XDBF), in its language.
+The menus' renderer has no shaders, so every image is made on the CPU at the exact pixel
+size it shows at: the 64×64 icons are resampled (Catmull-Rom) and rounded, and the
+lights, glow, shine, trophy and padlock are drawn. They stay sharp at any window size.
+
+To check the presentation without playing, start the game from Terminal with
+`NARUTORISE_ACHIEVEMENT_PREVIEW=all` (every toast), `=list`, `=menu` or `=home` (a
+press of the Home button), after
+`NARUTORISE_ACHIEVEMENT_PREVIEW_DELAY` seconds (15). These unlock nothing; `=unlock`
+really unlocks the first locked achievement, so use it only with a copy of `user/`
+(`--data_root=<copy>`).
+
+### The app macOS sees
+
+The app is a game for macOS (`LSApplicationCategoryType`), and it starts in full screen,
+where macOS applies Game Mode. That needs macOS to know the game's process as the app,
+which it does only for the process LaunchServices starts. The PC port runs the game in a
+child of a diagnostics supervisor, an anonymous process to macOS, so patch 7 runs it in
+the launched process instead. To bring the supervisor back for diagnosing a hang or a
+crash, start the game with `NARUTORISE_INCIDENT_SUPERVISOR=1`.
+
+The controller's Home button (Xbox, PS) reaches the game only while the game claims it,
+which it does on every controller while it runs. macOS 26 acts on the press as well and
+no app can stop it: for a game Apple hasn't listed for its Game Overlay, it opens the
+Games app when the button is released. So for a few seconds after a press the game took,
+the game closes the Games app the system opened (or hides it, if it was open already) and
+stays in front: the button only opens the achievements. In any other app it does what it
+always did.
 
 ### Quitting
 
@@ -288,6 +346,7 @@ of `macos/patches/pc` no longer applies, apply the series with `git am -3` on a 
 the new commit, resolve the conflicts and export it again with `git format-patch`.
 
 ### Known issues
+
 
 - The interpolated 60 FPS mode doesn't hold in the village on an M4 (about 40), measured
   with the previous version.

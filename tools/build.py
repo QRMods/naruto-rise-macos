@@ -150,6 +150,31 @@ def system_language():
     return menus, game
 
 
+def achievement_assets(resources):
+    """The orb and the unlock sound of the achievement toast, from macos/assets.
+
+    They are not this project's to publish (a console's logo and jingle), so
+    they stay out of Git: whoever builds puts achievement-orb.png and
+    achievement-unlocked.wav/.mp3/.m4a in macos/assets. Without them the toast
+    shows a neutral orb and plays no sound.
+    """
+    source = ROOT / 'macos/assets'
+    target = resources / 'achievements'
+    target.mkdir(parents=True, exist_ok=True)
+    orb = source / 'achievement-orb.png'
+    if orb.is_file():
+        shutil.copy2(orb, target / 'orb.png')
+    else:
+        (target / 'orb.png').unlink(missing_ok=True)
+    sounds = [path for path in sorted(source.glob('achievement-unlocked.*'))
+              if path.suffix.lower() in ('.wav', '.mp3', '.m4a', '.aif', '.aiff', '.caf')]
+    if sounds:
+        # 16-bit PCM WAV, which SDL plays without a decoder.
+        run('afconvert', '-f', 'WAVE', '-d', 'LEI16@44100', sounds[0], target / 'unlock.wav')
+    else:
+        (target / 'unlock.wav').unlink(missing_ok=True)
+
+
 def package():
     binaries = BUILD / 'app'
     contents = APP / 'Contents'
@@ -161,6 +186,7 @@ def package():
     for library in binaries.glob('*.dylib'):
         shutil.copy2(library, macos / library.name)
     shutil.copytree(binaries / 'vulkan', resources / 'vulkan', dirs_exist_ok=True)
+    achievement_assets(resources)
     # The PC port's default settings with the macOS ones over them (keyboard and
     # mouse, a window, 30 FPS), which the game copies into a new data folder.
     menus, game = system_language()
@@ -214,6 +240,10 @@ def package():
         'CFBundleVersion': '1',
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '26.0',
+        # A game for macOS: the controller's Home button then belongs to the game
+        # while it is in front (it opens the achievements, not the Games app), and
+        # Game Mode applies in full screen.
+        'LSApplicationCategoryType': 'public.app-category.action-games',
     }
     with (contents / 'Info.plist').open('wb') as stream:
         plistlib.dump(info, stream)
@@ -226,6 +256,11 @@ def package():
     for library in sorted(contents.rglob('*.dylib')):
         run('codesign', '--force', '--sign', '-', library)
     run('codesign', '--force', '--sign', '-', APP)
+    # LaunchServices learns the new category now, not at some later scan.
+    lsregister = Path('/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework'
+                      '/Support/lsregister')
+    if lsregister.is_file():
+        run(lsregister, '-f', APP)
     print(f'Application: {APP}', flush=True)
 
 

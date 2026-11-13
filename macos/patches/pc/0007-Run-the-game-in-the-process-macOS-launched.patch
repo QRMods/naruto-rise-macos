@@ -1,0 +1,53 @@
+From 2ac33e7402cdf194f1a4598243f83a920c7b8c30 Mon Sep 17 00:00:00 2001
+From: alantero <36408154+alantero@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 05:43:18 +0100
+Subject: [PATCH 7/7] Run the game in the process macOS launched
+
+macOS knows a process as the app only when LaunchServices starts it. The
+incident supervisor forks and executes the game as its child, which
+RunningBoard sees as an anonymous process: the window on screen is not
+the app's, so macOS applies no game policy to it even when the app is a
+game. It gets no Game Mode in full screen, and the controller's Home
+button opens the Games app instead of the Game Overlay.
+
+On macOS the game now runs in the launched process, as it already does
+when the supervisor cannot start. NARUTORISE_INCIDENT_SUPERVISOR=1
+brings the supervisor back, for diagnosing hangs and crashes.
+---
+ app/src/diagnostics/supervisor.cpp | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/app/src/diagnostics/supervisor.cpp b/app/src/diagnostics/supervisor.cpp
+index e0c96e3..a757513 100644
+--- a/app/src/diagnostics/supervisor.cpp
++++ b/app/src/diagnostics/supervisor.cpp
+@@ -19,6 +19,7 @@
+ #include <dbghelp.h>
+ #else
+ #include <cerrno>
++#include <cstdlib>
+ #include <csignal>
+ #include <fcntl.h>
+ #if defined(__linux__)
+@@ -275,6 +276,18 @@ int RunSupervised(std::vector<std::string> arguments, const fs::path& executable
+       FirstFailure("unhandled-cpp-exception", error.what()); throw;
+     } catch (...) { FirstFailure("unhandled-cpp-exception", "non-std exception"); throw; }
+   }
++#ifdef __APPLE__
++  // macOS knows a process as the app only when LaunchServices starts it: a
++  // child forked and executed from here is anonymous to the system, so its
++  // window is not the app's and macOS applies no game policy to it: no Game
++  // Mode in full screen, and the Games app instead of the Game Overlay for the
++  // controller's Home button. The game runs in the process macOS launched; the
++  // supervisor, for diagnosing hangs and crashes, only with
++  // NARUTORISE_INCIDENT_SUPERVISOR=1.
++  if (const char* supervise = std::getenv("NARUTORISE_INCIDENT_SUPERVISOR");
++      !supervise || std::string_view(supervise) != "1")
++    return run(arguments);
++#endif
+   auto environment = data::CaptureEnvironment(executable.parent_path());
+   if (!environment) { std::fprintf(stderr, "Diagnostics bootstrap: %s\n", environment.error.c_str()); return run(arguments); }
+   data::Overrides cli;
+-- 
+2.50.1 (Apple Git-155)
+
