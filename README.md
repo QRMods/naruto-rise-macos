@@ -290,11 +290,11 @@ which costs tens to hundreds of milliseconds on a Mac. On macOS:
   pipeline on the thread that records frames, and every fence wait of the game queued
   behind it (200 to 900 ms stutters when new content appeared). On macOS it skips like
   the D3D12 backend does. `REX_NATIVE_PSO_ASYNC=prefetch` brings back the PC port's wait.
-- Only draws the next frames redraw are skipped: those into a render target the game
-  draws every frame. A draw into a new target, into one drawn only now and then, or into
-  a tiny one (16 pixels or less on a side) waits for its pipeline instead. Some effects
-  draw such a target once and reuse it for many frames. The rage mode does this with a
-  one-row colour ramp. Skipping that draw left the screen black for the whole rage mode.
+- A draw into a tiny render target (16 pixels or less on a side) is never skipped. Such a
+  target holds a lookup the game may draw once and reuse for many frames. The rage mode
+  does this with a one-row colour ramp. Skipping that draw left the screen black for the
+  whole rage mode. Waiting for every draw into a new full-size target as well froze the
+  game for seconds after each load, so those draws still skip.
 - Compiled pipelines are saved in `user/cache/native-vulkan-pipelines.bin` and reused in
   later sessions.
 
