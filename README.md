@@ -333,11 +333,12 @@ crash, start the game with `NARUTORISE_INCIDENT_SUPERVISOR=1`.
 
 The controller's Home button (Xbox, PS) reaches the game only while the game claims it,
 which it does on every controller while it runs. macOS 26 acts on the press as well and
-no app can stop it: for a game Apple hasn't listed for its Game Overlay, it opens the
-Games app when the button is released. So for a few seconds after a press the game took,
-the game closes the Games app the system opened (or hides it, if it was open already) and
-stays in front: the button only opens the achievements. In any other app it does what it
-always did.
+no app can stop it: when the button is released, it shows its Game Overlay over a game it
+lists for it, or opens the Games app. So for a few seconds after a press the game took,
+the game hides the overlay (closes it if it stays in front) or closes the Games app (hides
+it, if it was open already) and stays in front: the button only opens the achievements.
+The overlay is also what hands the button to the system, so when you switch to another app
+or quit, the game starts it again: everywhere else the button does what it always did.
 
 ### Quitting
 

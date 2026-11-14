@@ -1,6 +1,6 @@
-From 2ac33e7402cdf194f1a4598243f83a920c7b8c30 Mon Sep 17 00:00:00 2001
+From 5ee1883e684f46c520dc6395bbc476c7bb56b27c Mon Sep 17 00:00:00 2001
 From: alantero <36408154+alantero@users.noreply.github.com>
-Date: Fri, 13 Nov 2026 05:43:18 +0100
+Date: Sat, 14 Nov 2026 05:36:21 +0100
 Subject: [PATCH 7/7] Run the game in the process macOS launched
 
 macOS knows a process as the app only when LaunchServices starts it. The
