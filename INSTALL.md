@@ -40,6 +40,7 @@ version is [README.md](README.md).
 | Build result | `dist/Naruto Rise of a Ninja.app`. The last output line is `Application: <path>`. |
 | Play command | `./Play.command`, or open the app. |
 | Achievement orb and sound | Optional. Not in the repository and not downloadable here: only if the user already has them, they go in `macos/assets/` as `achievement-orb.png` and `achievement-unlocked.mp3` before building. Without them the toast is plain and silent. |
+| App icon | Optional. Not in the repository: only if the user has a picture for it, it goes in `macos/assets/` as `app-icon.png` or `app-icon.jpg` before building. Without it the app has the generic icon. |
 | User data | `user/`: saves, `narutorise.toml` (settings), `cache/`, `logs/` (one log per session, `narutorise_NNN.log`), `incidents/` (why a session ended). |
 
 The build, in order: clones the source projects into `upstream/` at the commits in

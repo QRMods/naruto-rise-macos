@@ -162,6 +162,11 @@ put `achievement-orb.png` and `achievement-unlocked.mp3` (or `.wav` or `.m4a`) i
 `macos/assets/` before building. Without them the toast shows a plain silver orb and
 makes no sound.
 
+The app's icon isn't part of this project either, since it would be the game's cover.
+To have one, put a picture in `macos/assets/` as `app-icon.png` or `app-icon.jpg` before
+building (square, 1024×1024 is best). The build gives it the shape of a macOS icon.
+Without it the app has the generic icon.
+
 ## Settings
 
 Settings are in `user/narutorise.toml`, created by the first build. Edit it with any text

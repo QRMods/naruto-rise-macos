@@ -175,6 +175,35 @@ def achievement_assets(resources):
         (target / 'unlock.wav').unlink(missing_ok=True)
 
 
+def app_icon(resources):
+    """The app's icon (Contents/Resources/AppIcon.icns) from a picture; whether there is one.
+
+    The game's cover is not this project's to publish, so the picture stays out
+    of Git: whoever builds puts it in macos/assets/app-icon.png or .jpg (or
+    narutorise-icon.jpg beside this checkout's README). tools/app_icon.swift
+    shapes it as a macOS icon. Without a picture the app has the generic icon.
+    """
+    pictures = [ROOT / 'macos/assets' / f'app-icon.{suffix}' for suffix in ('png', 'jpg', 'jpeg')]
+    picture = next((path for path in [*pictures, ROOT / 'narutorise-icon.jpg'] if path.is_file()), None)
+    icns = resources / 'AppIcon.icns'
+    if not picture:
+        icns.unlink(missing_ok=True)
+        return False
+    work = BUILD / 'app-icon'
+    shutil.rmtree(work, ignore_errors=True)
+    iconset = work / 'AppIcon.iconset'
+    iconset.mkdir(parents=True)
+    master = work / 'icon-1024.png'
+    run('swift', ROOT / 'tools/app_icon.swift', picture, master)
+    for size in (16, 32, 128, 256, 512):
+        for scale in (1, 2):
+            name = f'icon_{size}x{size}{"@2x" if scale == 2 else ""}.png'
+            subprocess.run(['sips', '-z', str(size * scale), str(size * scale), str(master), '--out', str(iconset / name)],
+                           env=ENV, check=True, stdout=subprocess.DEVNULL)
+    run('iconutil', '-c', 'icns', iconset, '-o', icns)
+    return True
+
+
 def package():
     binaries = BUILD / 'app'
     contents = APP / 'Contents'
@@ -187,6 +216,7 @@ def package():
         shutil.copy2(library, macos / library.name)
     shutil.copytree(binaries / 'vulkan', resources / 'vulkan', dirs_exist_ok=True)
     achievement_assets(resources)
+    icon = app_icon(resources)
     # The PC port's default settings with the macOS ones over them (keyboard and
     # mouse, a window, 30 FPS), which the game copies into a new data folder.
     menus, game = system_language()
@@ -245,6 +275,8 @@ def package():
         # Game Mode applies in full screen.
         'LSApplicationCategoryType': 'public.app-category.action-games',
     }
+    if icon:
+        info['CFBundleIconFile'] = 'AppIcon'
     with (contents / 'Info.plist').open('wb') as stream:
         plistlib.dump(info, stream)
     licenses = resources / 'licenses'
